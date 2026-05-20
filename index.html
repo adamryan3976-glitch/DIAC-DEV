@@ -17,7 +17,7 @@
     <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
     <script src="https://unpkg.com/lucide@latest"></script>
     
-    <!-- Google Identity Services Library -->
+    <!-- Google Identity Services Library for SSO -->
     <script src="https://accounts.google.com/gsi/client" async defer></script>
     
     <style>
@@ -59,7 +59,7 @@
         };
 
         function App() {
-            // Login & Auth State
+            // Login & Auth State (Google SSO)
             const [currentUser, setCurrentUser] = useState(() => localStorage.getItem("diac_user") || null);
             const [isHoc, setIsHoc] = useState(() => localStorage.getItem("diac_ishoc") === "true");
             const [authError, setAuthError] = useState("");
@@ -255,17 +255,20 @@
                     const response = await fetch(`${API_URL}?action=updateAbsence&id=${id}&status=${status}`);
                     const data = await response.json();
                     if (data.success) {
-                        setAbsences(prev => prev.map(item => item.ID === id ? { ...item, Status: status } : item));
+                        setAbsences(prev => prev.map(item => (item.ID || item.id) === id ? { ...item, Status: status, status: status } : item));
                     }
                 } catch (e) {
                     console.error(e);
                 }
             };
 
+            // ---------------------------------------------------------
+            // LOGIN SCREEN (Only shows if currentUser is null)
+            // ---------------------------------------------------------
             if (!currentUser) {
                 return (
                     <div className="min-h-screen flex flex-col justify-center items-center bg-[#f8fafc] p-6 text-center select-none">
-                        <div className="max-w-sm w-full bg-white rounded-[2.5rem] p-8 border border-slate-150 shadow-2xl scale-in">
+                        <div className="max-w-sm w-full bg-white rounded-[2.5rem] p-8 border border-slate-200 shadow-2xl scale-in">
                             <img src="https://raw.githubusercontent.com/adamryan3976-glitch/DIAC26/main/diaclogo.png" 
                                  className="w-24 h-24 mx-auto mb-6 drop-shadow-xl" 
                                  alt="DIAC Logo" />
@@ -299,8 +302,11 @@
                 );
             }
 
+            // ---------------------------------------------------------
+            // MAIN APPLICATION LAYOUT (Shows when logged in)
+            // ---------------------------------------------------------
             return (
-                <div className="min-h-screen bg-slate-50 pb-28 relative flex flex-col">
+                <div className="min-h-screen bg-[#f8fafc] pb-28 relative flex flex-col">
                     {/* Header Banner */}
                     <header className="bg-slate-900 border-b border-slate-800 sticky top-0 z-50 text-white">
                         <div className="max-w-2xl mx-auto px-4 py-3 flex items-center justify-between">
@@ -308,19 +314,19 @@
                                 <img src="https://raw.githubusercontent.com/adamryan3976-glitch/DIAC26/main/diaclogo.png" className="w-10 h-10" alt="Logo" />
                                 <div>
                                     <h1 className="text-base font-black tracking-tight uppercase leading-none">DIAC Hub</h1>
-                                    <p className="text-[9px] font-bold text-slate-500 uppercase tracking-widest mt-1">
+                                    <p className="text-[9px] font-bold text-slate-400 uppercase tracking-widest mt-1">
                                         Sync: {syncTime || 'fetching...'}
                                     </p>
                                 </div>
                             </div>
 
                             {/* View Toggle */}
-                            <div className="flex bg-slate-950 p-1 rounded-xl border border-slate-800">
-                                <button onClick={() => setActiveTab('roster')} className={`px-4 py-2 text-[10px] font-black uppercase tracking-wider rounded-lg transition-all ${activeTab === 'roster' ? 'bg-blue-600 text-white shadow-md' : 'text-slate-400'}`}>Roster</button>
-                                <button onClick={() => setActiveTab('schedule')} className={`px-4 py-2 text-[10px] font-black uppercase tracking-wider rounded-lg transition-all ${activeTab === 'schedule' ? 'bg-blue-600 text-white shadow-md' : 'text-slate-400'}`}>Schedule</button>
-                                <button onClick={() => setActiveTab('attendance')} className={`px-4 py-2 text-[10px] font-black uppercase tracking-wider rounded-lg transition-all ${activeTab === 'attendance' ? 'bg-blue-600 text-white shadow-md' : 'text-slate-400'}`}>Attendance</button>
+                            <div className="flex bg-slate-800 p-1 rounded-xl border border-slate-700">
+                                <button onClick={() => setActiveTab('roster')} className={`px-4 py-2 text-[10px] font-black uppercase tracking-wider rounded-lg transition-all ${activeTab === 'roster' ? 'bg-blue-600 text-white shadow-md' : 'text-slate-300'}`}>Roster</button>
+                                <button onClick={() => setActiveTab('schedule')} className={`px-4 py-2 text-[10px] font-black uppercase tracking-wider rounded-lg transition-all ${activeTab === 'schedule' ? 'bg-blue-600 text-white shadow-md' : 'text-slate-300'}`}>Schedule</button>
+                                <button onClick={() => setActiveTab('attendance')} className={`px-4 py-2 text-[10px] font-black uppercase tracking-wider rounded-lg transition-all ${activeTab === 'attendance' ? 'bg-blue-600 text-white shadow-md' : 'text-slate-300'}`}>Attendance</button>
                                 {isHoc && (
-                                    <button onClick={() => setActiveTab('hoc')} className={`px-4 py-2 text-[10px] font-black uppercase tracking-wider rounded-lg transition-all ${activeTab === 'hoc' ? 'bg-amber-600 text-white shadow-md' : 'text-amber-500/60'}`}>HOC</button>
+                                    <button onClick={() => setActiveTab('hoc')} className={`px-4 py-2 text-[10px] font-black uppercase tracking-wider rounded-lg transition-all ${activeTab === 'hoc' ? 'bg-amber-600 text-white shadow-md' : 'text-amber-500/80'}`}>HOC</button>
                                 )}
                             </div>
                         </div>
@@ -337,13 +343,13 @@
 
                         {!loading && activeTab === "roster" && (
                             <div className="space-y-4">
-                                <div className="bg-white rounded-[2rem] p-5 border border-slate-100 flex gap-3 items-center shadow-sm">
+                                <div className="bg-white rounded-[2rem] p-5 border border-slate-200 flex gap-3 items-center shadow-sm">
                                     <input 
                                         type="text" 
                                         placeholder="Search campers or cabin..." 
                                         value={searchTerm}
                                         onChange={e => setSearchTerm(e.target.value)}
-                                        className="flex-1 bg-slate-50 border border-slate-200 rounded-2xl p-4 font-bold text-slate-850 placeholder-slate-400 focus:outline-none focus:border-blue-500 text-sm" />
+                                        className="flex-1 bg-slate-50 border border-slate-200 rounded-2xl p-4 font-bold text-slate-800 placeholder-slate-400 focus:outline-none focus:border-blue-500 text-sm" />
                                     
                                     <select 
                                         value={selectedCabinFilter}
@@ -357,11 +363,11 @@
                                     {filteredStudents.map(student => {
                                         const formattedPhoto = getPhotoUrl(student.photo);
                                         return (
-                                            <div key={student.stuNum} onClick={() => setSelectedStudent(student)} className="bg-white hover:bg-slate-50 rounded-3xl p-4 border border-slate-100 shadow-sm flex items-center justify-between cursor-pointer transition-all active:scale-[0.98]">
+                                            <div key={student.stuNum} onClick={() => setSelectedStudent(student)} className="bg-white hover:bg-slate-50 rounded-3xl p-4 border border-slate-200 shadow-sm flex items-center justify-between cursor-pointer transition-all active:scale-[0.98]">
                                                 <div className="flex items-center gap-4">
-                                                    {/* Profile Photo Restoration using formated Google Drive view link */}
+                                                    {/* Original Profile Photo Display */}
                                                     {formattedPhoto ? (
-                                                        <img src={formattedPhoto} className="w-12 h-12 rounded-2xl object-cover shadow-inner" alt={student.preferredName} />
+                                                        <img src={formattedPhoto} className="w-12 h-12 rounded-2xl object-cover shadow-sm border border-slate-100" alt={student.preferredName} />
                                                     ) : (
                                                         <div className="w-12 h-12 rounded-2xl bg-blue-50 flex items-center justify-center font-black text-blue-600 text-lg">
                                                             {student.preferredName ? student.preferredName.charAt(0) : student.firstName.charAt(0)}
@@ -382,18 +388,18 @@
 
                         {!loading && activeTab === "schedule" && (
                             <div className="space-y-4">
-                                <div className="bg-white rounded-3xl border border-slate-100 shadow-sm overflow-hidden">
+                                <div className="bg-white rounded-3xl border border-slate-200 shadow-sm overflow-hidden">
                                     <table className="w-full text-left border-collapse">
                                         <thead>
-                                            <tr className="border-b border-slate-100 bg-slate-50">
+                                            <tr className="border-b border-slate-200 bg-slate-50">
                                                 <th className="p-4 text-xs font-bold uppercase tracking-wider text-slate-500">Time</th>
                                                 <th className="p-4 text-xs font-bold uppercase tracking-wider text-slate-500">Activity</th>
                                                 <th className="p-4 text-xs font-bold uppercase tracking-wider text-slate-500">Location</th>
                                             </tr>
                                         </thead>
-                                        <tbody className="divide-y divide-slate-100/50">
+                                        <tbody className="divide-y divide-slate-100">
                                             {schedule.map((item, idx) => (
-                                                <tr key={idx} className="hover:bg-slate-50/50 transition-colors">
+                                                <tr key={idx} className="hover:bg-slate-50 transition-colors">
                                                     <td className="p-4 text-xs font-black text-blue-600">{item["Time:"]}</td>
                                                     <td className="p-4 text-xs font-medium text-slate-800">{item["Activity:"]}</td>
                                                     <td className="p-4 text-xs text-slate-500 italic">{item["Location:"]}</td>
@@ -407,10 +413,10 @@
 
                         {!loading && activeTab === "attendance" && (
                             <div className="space-y-6">
-                                <div className="bg-white rounded-[2rem] p-6 border border-slate-100 space-y-4 shadow-sm">
+                                <div className="bg-white rounded-[2rem] p-6 border border-slate-200 space-y-4 shadow-sm">
                                     <div className="grid grid-cols-2 gap-3">
                                         <div>
-                                            <label className="text-[9px] font-black uppercase text-slate-455 tracking-wider block mb-2">Session</label>
+                                            <label className="text-[9px] font-black uppercase text-slate-500 tracking-wider block mb-2">Session</label>
                                             <select value={attendanceSession} onChange={e => setAttendanceSession(e.target.value)} className="w-full bg-slate-50 border border-slate-200 rounded-2xl p-4 font-black text-slate-800 focus:outline-none">
                                                 <option value="S1">Session 1</option>
                                                 <option value="S2">Session 2</option>
@@ -419,7 +425,7 @@
                                             </select>
                                         </div>
                                         <div>
-                                            <label className="text-[9px] font-black uppercase text-slate-455 tracking-wider block mb-2">Activity/Class</label>
+                                            <label className="text-[9px] font-black uppercase text-slate-500 tracking-wider block mb-2">Activity/Class</label>
                                             <select value={attendanceClass} onChange={e => setAttendanceClass(e.target.value)} className="w-full bg-slate-50 border border-slate-200 rounded-2xl p-4 font-black text-slate-800 focus:outline-none">
                                                 {classes[attendanceSession]?.map(cls => <option key={cls} value={cls}>{cls}</option>)}
                                             </select>
@@ -429,8 +435,8 @@
 
                                 <div className="space-y-3">
                                     {attendanceListing.map(camper => (
-                                        <div key={camper.displayName} className="bg-white rounded-3xl p-4 border border-slate-100 shadow-sm flex items-center justify-between">
-                                            <span className="font-extrabold text-slate-850">{camper.displayName}</span>
+                                        <div key={camper.displayName} className="bg-white rounded-3xl p-4 border border-slate-200 shadow-sm flex items-center justify-between">
+                                            <span className="font-extrabold text-slate-800">{camper.displayName}</span>
                                             <div className="flex gap-1 bg-slate-50 p-1 rounded-xl border border-slate-200">
                                                 {["Present", "Absent"].map(state => {
                                                     const isChecked = (attendanceStates[camper.displayName] || "Present") === state;
@@ -451,39 +457,57 @@
                                         <button 
                                             onClick={submitAttendanceReport}
                                             disabled={isSubmittingAttendance}
-                                            className="w-full bg-blue-600 text-white py-5 rounded-2xl font-black uppercase tracking-wider text-xs hover:bg-blue-750 active:scale-[0.98] transition-all mt-4 disabled:opacity-50 shadow-md shadow-blue-500/10">
+                                            className="w-full bg-blue-600 text-white py-5 rounded-2xl font-black uppercase tracking-wider text-xs hover:bg-blue-700 active:scale-[0.98] transition-all mt-4 disabled:opacity-50 shadow-md">
                                             {isSubmittingAttendance ? 'Submitting...' : 'Submit Attendance Roll'}
                                         </button>
                                     )}
+                                </div>
+
+                                {/* Original Recent Reports Section */}
+                                <div className="mt-8">
+                                    <h3 className="text-sm font-black text-slate-800 uppercase tracking-widest mb-4">Recent Reports</h3>
+                                    <div className="space-y-3">
+                                        {absences.length > 0 ? [...absences].reverse().slice(0, 10).map((a, i) => (
+                                            <div key={i} className="flex justify-between items-center p-3 bg-white rounded-2xl text-xs border border-slate-200 shadow-sm">
+                                                <div>
+                                                    <span className="font-bold text-slate-800">{a.StudentName || a.studentName}</span>
+                                                    <p className="text-[9px] text-slate-500 font-bold uppercase tracking-wider mt-1">Session {a.Session || a.session} • {a.Activity || a.activity}</p>
+                                                </div>
+                                                <div className="text-[9px] font-black text-rose-600 bg-rose-50 border border-rose-100 px-2 py-1 rounded-lg uppercase">{a.Status || a.status}</div>
+                                            </div>
+                                        )) : (
+                                            <p className="text-center py-8 text-slate-400 text-xs font-bold italic">No reports yet today</p>
+                                        )}
+                                    </div>
                                 </div>
                             </div>
                         )}
 
                         {!loading && activeTab === "hoc" && isHoc && (
                             <div className="space-y-4">
-                                <div className="bg-white rounded-[2rem] p-6 border border-slate-100 text-center shadow-sm">
+                                <div className="bg-white rounded-[2rem] p-6 border border-slate-200 text-center shadow-sm">
                                     <h2 className="text-xl font-black text-slate-900 uppercase tracking-tight">HOC Incident Room</h2>
                                     <p className="text-[10px] font-bold text-amber-500 uppercase tracking-widest mt-1">Pending Absences and Verifications</p>
                                 </div>
 
                                 <div className="space-y-3">
-                                    {absences.filter(item => item.Status === "Absent").map(item => (
-                                        <div key={item.ID} className="bg-white rounded-3xl p-5 border border-slate-100 shadow-sm space-y-4">
+                                    {absences.filter(item => (item.Status || item.status) === "Absent").map((item, idx) => (
+                                        <div key={item.ID || idx} className="bg-white rounded-3xl p-5 border border-slate-200 shadow-sm space-y-4">
                                             <div className="flex justify-between items-start">
                                                 <div>
-                                                    <span className="text-[8px] font-black text-rose-600 uppercase tracking-widest bg-rose-50 px-2 py-0.5 rounded">Absence Reported</span>
-                                                    <h3 className="text-base font-black text-slate-800 mt-2">{item.StudentName}</h3>
-                                                    <p className="text-[10px] text-slate-500 font-bold uppercase tracking-wider mt-1">{item.Cabin} &bull; Session {item.Session}</p>
+                                                    <span className="text-[8px] font-black text-rose-600 uppercase tracking-widest bg-rose-50 px-2 py-0.5 rounded border border-rose-100">Absence Reported</span>
+                                                    <h3 className="text-base font-black text-slate-800 mt-2">{item.StudentName || item.studentName}</h3>
+                                                    <p className="text-[10px] text-slate-500 font-bold uppercase tracking-wider mt-1">{item.Cabin || item.cabin} &bull; Session {item.Session || item.session}</p>
                                                 </div>
                                                 <div className="text-right">
-                                                    <p className="text-[10px] font-extrabold text-slate-800">{item.Activity}</p>
-                                                    <p className="text-[8px] text-slate-400 font-semibold mt-1">By {item.ReportedBy}</p>
+                                                    <p className="text-[10px] font-extrabold text-slate-800">{item.Activity || item.activity}</p>
+                                                    <p className="text-[8px] text-slate-400 font-semibold mt-1">By {item.ReportedBy || item.reportedBy}</p>
                                                 </div>
                                             </div>
 
-                                            <div className="grid grid-cols-2 gap-2 pt-2 border-t border-slate-100">
-                                                <button onClick={() => updateAbsenceVerification(item.ID, "Excused")} className="py-3 bg-emerald-50 text-emerald-600 rounded-xl font-black uppercase text-[10px] tracking-wider border border-emerald-100 hover:bg-emerald-100/50">Excused</button>
-                                                <button onClick={() => updateAbsenceVerification(item.ID, "Resolved")} className="py-3 bg-blue-50 text-blue-600 rounded-xl font-black uppercase text-[10px] tracking-wider border border-blue-100 hover:bg-blue-100/50">Resolved</button>
+                                            <div className="grid grid-cols-2 gap-2 pt-3 border-t border-slate-100">
+                                                <button onClick={() => updateAbsenceVerification(item.ID || item.id, "Excused")} className="py-3 bg-emerald-50 text-emerald-600 rounded-xl font-black uppercase text-[10px] tracking-wider border border-emerald-100 hover:bg-emerald-100 transition-colors">Excused</button>
+                                                <button onClick={() => updateAbsenceVerification(item.ID || item.id, "Resolved")} className="py-3 bg-blue-50 text-blue-600 rounded-xl font-black uppercase text-[10px] tracking-wider border border-blue-100 hover:bg-blue-100 transition-colors">Resolved</button>
                                             </div>
                                         </div>
                                     ))}
@@ -493,13 +517,13 @@
 
                         {/* Student Detail Modal Drawer */}
                         {selectedStudent && (
-                            <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[100] flex items-end justify-center p-4" onClick={() => setSelectedStudent(null)}>
-                                <div className="bg-white w-full max-w-md rounded-[2.5rem] p-6 border border-slate-100 overflow-y-auto max-h-[85vh] scroll-hide scale-in" onClick={e => e.stopPropagation()}>
+                            <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-[100] flex items-end justify-center p-4" onClick={() => setSelectedStudent(null)}>
+                                <div className="bg-white w-full max-w-md rounded-[2.5rem] p-6 border border-slate-200 overflow-y-auto max-h-[85vh] scroll-hide scale-in shadow-2xl" onClick={e => e.stopPropagation()}>
                                     <div className="flex justify-between items-start mb-6 border-b border-slate-100 pb-4">
                                         <div className="flex items-center gap-4">
-                                            {/* Photo inside Detail Modal */}
+                                            {/* Original Photo logic inside Detail Modal */}
                                             {getPhotoUrl(selectedStudent.photo) ? (
-                                                <img src={getPhotoUrl(selectedStudent.photo)} className="w-14 h-14 rounded-2xl object-cover shadow-md border border-slate-100" alt={selectedStudent.preferredName} />
+                                                <img src={getPhotoUrl(selectedStudent.photo)} className="w-14 h-14 rounded-2xl object-cover shadow-sm border border-slate-200" alt={selectedStudent.preferredName} />
                                             ) : (
                                                 <div className="w-14 h-14 rounded-2xl bg-blue-50 flex items-center justify-center font-black text-blue-600 text-xl">
                                                     {selectedStudent.preferredName ? selectedStudent.preferredName.charAt(0) : selectedStudent.firstName.charAt(0)}
@@ -510,36 +534,36 @@
                                                 <p className="text-xs text-slate-500 mt-1">{selectedStudent.pronouns} &bull; Cabin: {selectedStudent.cabin}</p>
                                             </div>
                                         </div>
-                                        <button onClick={() => setSelectedStudent(null)} className="p-2 bg-slate-50 text-slate-400 rounded-full hover:text-slate-600">
+                                        <button onClick={() => setSelectedStudent(null)} className="p-2 bg-slate-100 text-slate-500 rounded-full hover:bg-slate-200 transition-colors">
                                             <i className="fas fa-times"></i>
                                         </button>
                                     </div>
 
                                     <div className="space-y-4 text-sm text-slate-600">
                                         <div className="grid grid-cols-2 gap-3">
-                                            <div className="bg-slate-50 p-3 rounded-2xl border border-slate-100">
+                                            <div className="bg-slate-50 p-3 rounded-2xl border border-slate-200">
                                                 <p className="text-[8px] font-black text-slate-400 uppercase">Birthdate</p>
                                                 <p className="font-bold text-slate-800 mt-1">{selectedStudent.birthDate}</p>
                                             </div>
-                                            <div className="bg-slate-50 p-3 rounded-2xl border border-slate-100">
+                                            <div className="bg-slate-50 p-3 rounded-2xl border border-slate-200">
                                                 <p className="text-[8px] font-black text-slate-400 uppercase">Grade</p>
                                                 <p className="font-bold text-slate-800 mt-1">{selectedStudent.grade}</p>
                                             </div>
                                         </div>
 
-                                        <div className="bg-slate-50 p-4 rounded-2xl border border-slate-100 space-y-2">
+                                        <div className="bg-slate-50 p-4 rounded-2xl border border-slate-200 space-y-2">
                                             <p className="text-[8px] font-black text-slate-400 uppercase">Guardian Contacts</p>
                                             <p className="font-bold text-slate-800 text-xs">{selectedStudent.guardianFirstName} {selectedStudent.guardianLastName} ({selectedStudent.guardianPhone})</p>
                                             <p className="text-xs text-slate-500">{selectedStudent.guardianEmail}</p>
                                         </div>
 
-                                        <div className="bg-slate-50 p-4 rounded-2xl border border-slate-100">
+                                        <div className="bg-slate-50 p-4 rounded-2xl border border-slate-200">
                                             <p className="text-[8px] font-black text-slate-400 uppercase">Medical / Dietary Notes</p>
-                                            <p className="font-extrabold text-amber-500 text-xs mt-1">Diet: {selectedStudent.dietary || 'None'}</p>
-                                            <p className="font-extrabold text-rose-500 text-xs mt-1">Allergies: {selectedStudent.allergies || 'None'}</p>
+                                            <p className="font-extrabold text-amber-600 text-xs mt-1">Diet: {selectedStudent.dietary || 'None'}</p>
+                                            <p className="font-extrabold text-rose-600 text-xs mt-1">Allergies: {selectedStudent.allergies || 'None'}</p>
                                         </div>
 
-                                        <div className="bg-slate-50 p-4 rounded-2xl border border-slate-100 space-y-3">
+                                        <div className="bg-slate-50 p-4 rounded-2xl border border-slate-200 space-y-3">
                                             <p className="text-[8px] font-black text-slate-400 uppercase">Scheduled Rotations</p>
                                             <div className="grid grid-cols-2 gap-2 text-xs">
                                                 <div>
@@ -575,7 +599,7 @@
                         <div className="bg-slate-900/95 backdrop-blur-md text-white px-6 py-3 rounded-full shadow-2xl flex items-center gap-3 border border-white/10 pointer-events-auto">
                             <span className="text-[10px] font-black uppercase tracking-widest">{currentUser}</span>
                             <div className="w-[1px] h-3 bg-slate-700 mx-1"></div>
-                            <button onClick={() => { localStorage.clear(); window.location.reload(); }} className="text-[10px] font-black text-rose-400 uppercase tracking-widest">Exit</button>
+                            <button onClick={() => { localStorage.clear(); window.location.reload(); }} className="text-[10px] font-black text-rose-400 uppercase tracking-widest hover:text-rose-300 transition-colors">Logout</button>
                         </div>
                     </footer>
                 </div>
