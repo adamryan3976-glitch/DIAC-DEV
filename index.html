@@ -49,6 +49,14 @@
         const GOOGLE_CLIENT_ID = "241712157669-1huukafbcpsifc4v35op6o80qjb10r0r.apps.googleusercontent.com"; 
         const API_URL = "https://script.google.com/macros/s/AKfycbyLa9VEQWwPR_yTU50r09f-X_PHMyOxFV4cOqyuZvLOuu861OiTfwrsp8a6Z6RnYOre/exec";
 
+        // Photo URL Formatting Utility from original DIAC-index.html
+        const getPhotoUrl = (photoId) => {
+            if (!photoId) return null;
+            const cleanId = String(photoId).trim();
+            if (cleanId.startsWith('http')) return cleanId;
+            return `https://docs.google.com/uc?export=view&id=${cleanId}`;
+        };
+
         function App() {
             // Login & Auth State
             const [currentUser, setCurrentUser] = useState(() => localStorage.getItem("diac_user") || null);
@@ -345,25 +353,28 @@
                                 </div>
 
                                 <div className="space-y-3">
-                                    {filteredStudents.map(student => (
-                                        <div key={student.stuNum} onClick={() => setSelectedStudent(student)} className="bg-white hover:bg-slate-50 rounded-3xl p-4 border border-slate-100 shadow-sm flex items-center justify-between cursor-pointer transition-all active:scale-[0.98]">
-                                            <div className="flex items-center gap-4">
-                                                {/* Profile Photo Restoration */}
-                                                {student.photo ? (
-                                                    <img src={student.photo} className="w-12 h-12 rounded-2xl object-cover shadow-inner" alt={student.preferredName} />
-                                                ) : (
-                                                    <div className="w-12 h-12 rounded-2xl bg-blue-50 flex items-center justify-center font-black text-blue-600 text-lg">
-                                                        {student.preferredName ? student.preferredName.charAt(0) : student.firstName.charAt(0)}
+                                    {filteredStudents.map(student => {
+                                        const formattedPhoto = getPhotoUrl(student.photo);
+                                        return (
+                                            <div key={student.stuNum} onClick={() => setSelectedStudent(student)} className="bg-white hover:bg-slate-50 rounded-3xl p-4 border border-slate-100 shadow-sm flex items-center justify-between cursor-pointer transition-all active:scale-[0.98]">
+                                                <div className="flex items-center gap-4">
+                                                    {/* Profile Photo Restoration using formated Google Drive view link */}
+                                                    {formattedPhoto ? (
+                                                        <img src={formattedPhoto} className="w-12 h-12 rounded-2xl object-cover shadow-inner" alt={student.preferredName} />
+                                                    ) : (
+                                                        <div className="w-12 h-12 rounded-2xl bg-blue-50 flex items-center justify-center font-black text-blue-600 text-lg">
+                                                            {student.preferredName ? student.preferredName.charAt(0) : student.firstName.charAt(0)}
+                                                        </div>
+                                                    )}
+                                                    <div>
+                                                        <h4 className="font-extrabold text-slate-800">{student.preferredName}</h4>
+                                                        <p className="text-[10px] text-slate-500 font-bold uppercase tracking-wider mt-1">{student.cabin}</p>
                                                     </div>
-                                                )}
-                                                <div>
-                                                    <h4 className="font-extrabold text-slate-800">{student.preferredName}</h4>
-                                                    <p className="text-[10px] text-slate-500 font-bold uppercase tracking-wider mt-1">{student.cabin}</p>
                                                 </div>
+                                                <span className="text-xs font-black text-blue-600 bg-blue-50 px-3 py-1 rounded-full">{student.grade}</span>
                                             </div>
-                                            <span className="text-xs font-black text-blue-600 bg-blue-50 px-3 py-1 rounded-full">{student.grade}</span>
-                                        </div>
-                                    ))}
+                                        );
+                                    })}
                                 </div>
                             </div>
                         )}
@@ -398,7 +409,7 @@
                                 <div className="bg-white rounded-[2rem] p-6 border border-slate-100 space-y-4 shadow-sm">
                                     <div className="grid grid-cols-2 gap-3">
                                         <div>
-                                            <label className="text-[9px] font-black uppercase text-slate-450 tracking-wider block mb-2">Session</label>
+                                            <label className="text-[9px] font-black uppercase text-slate-455 tracking-wider block mb-2">Session</label>
                                             <select value={attendanceSession} onChange={e => setAttendanceSession(e.target.value)} className="w-full bg-slate-50 border border-slate-200 rounded-2xl p-4 font-black text-slate-800 focus:outline-none">
                                                 <option value="S1">Session 1</option>
                                                 <option value="S2">Session 2</option>
@@ -407,7 +418,7 @@
                                             </select>
                                         </div>
                                         <div>
-                                            <label className="text-[9px] font-black uppercase text-slate-450 tracking-wider block mb-2">Activity/Class</label>
+                                            <label className="text-[9px] font-black uppercase text-slate-455 tracking-wider block mb-2">Activity/Class</label>
                                             <select value={attendanceClass} onChange={e => setAttendanceClass(e.target.value)} className="w-full bg-slate-50 border border-slate-200 rounded-2xl p-4 font-black text-slate-800 focus:outline-none">
                                                 {classes[attendanceSession]?.map(cls => <option key={cls} value={cls}>{cls}</option>)}
                                             </select>
@@ -486,8 +497,8 @@
                                     <div className="flex justify-between items-start mb-6 border-b border-slate-100 pb-4">
                                         <div className="flex items-center gap-4">
                                             {/* Photo inside Detail Modal */}
-                                            {selectedStudent.photo ? (
-                                                <img src={selectedStudent.photo} className="w-14 h-14 rounded-2xl object-cover shadow-md border border-slate-100" alt={selectedStudent.preferredName} />
+                                            {getPhotoUrl(selectedStudent.photo) ? (
+                                                <img src={getPhotoUrl(selectedStudent.photo)} className="w-14 h-14 rounded-2xl object-cover shadow-md border border-slate-100" alt={selectedStudent.preferredName} />
                                             ) : (
                                                 <div className="w-14 h-14 rounded-2xl bg-blue-50 flex items-center justify-center font-black text-blue-600 text-xl">
                                                     {selectedStudent.preferredName ? selectedStudent.preferredName.charAt(0) : selectedStudent.firstName.charAt(0)}
@@ -523,7 +534,7 @@
 
                                         <div className="bg-slate-50 p-4 rounded-2xl border border-slate-100">
                                             <p className="text-[8px] font-black text-slate-400 uppercase">Medical / Dietary Notes</p>
-                                            <p className="font-extrabold text-amber-600 text-xs mt-1">Diet: {selectedStudent.dietary || 'None'}</p>
+                                            <p className="font-extrabold text-amber-500 text-xs mt-1">Diet: {selectedStudent.dietary || 'None'}</p>
                                             <p className="font-extrabold text-rose-500 text-xs mt-1">Allergies: {selectedStudent.allergies || 'None'}</p>
                                         </div>
 
