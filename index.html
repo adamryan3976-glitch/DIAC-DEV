@@ -49,10 +49,11 @@
         const GOOGLE_CLIENT_ID = "241712157669-1huukafbcpsifc4v35op6o80qjb10r0r.apps.googleusercontent.com"; 
         const API_URL = "https://script.google.com/macros/s/AKfycbyLa9VEQWwPR_yTU50r09f-X_PHMyOxFV4cOqyuZvLOuu861OiTfwrsp8a6Z6RnYOre/exec";
 
-        // Photo URL Formatting Utility from original DIAC-index.html
+        // Photo URL Formatting Utility
         const getPhotoUrl = (photoId) => {
             if (!photoId) return null;
             const cleanId = String(photoId).trim();
+            if (cleanId === "" || cleanId === "undefined" || cleanId === "null") return null;
             if (cleanId.startsWith('http')) return cleanId;
             return `https://docs.google.com/uc?export=view&id=${cleanId}`;
         };
@@ -329,7 +330,7 @@
                     <main className="max-w-xl mx-auto w-full px-4 pt-6 flex-grow">
                         {loading && (
                             <div className="flex flex-col justify-center items-center py-20 text-slate-400">
-                                <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600 mb-4"></div>
+                                <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-500 mb-4"></div>
                                 <p className="text-xs uppercase tracking-widest font-black animate-pulse">Syncing Cloud Database...</p>
                             </div>
                         )}
