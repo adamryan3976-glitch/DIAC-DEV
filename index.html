@@ -667,6 +667,26 @@
                                         <p className="text-center py-8 text-slate-400 text-xs font-bold italic">No active absences for Session {hocSession} today</p>
                                     )}
                                 </div>
+
+                                {/* Recent Reports block logic */}
+                                <div className="mt-8">
+                                    <h3 className="text-sm font-black text-slate-800 uppercase tracking-widest mb-4 px-2">Recent Absence Reports</h3>
+                                    <div className="space-y-3">
+                                        {recentReportsList.length > 0 ? recentReportsList.map((a, i) => (
+                                            <div key={i} className="flex justify-between items-center p-3 bg-white/70 backdrop-blur-sm rounded-2xl text-xs border border-white shadow-sm">
+                                                <div>
+                                                    <span className="font-bold text-slate-800">{a.studentName}</span>
+                                                    <p className="text-[9px] text-slate-400 font-bold mt-1">Session {a.session} • {a.activity}</p>
+                                                    {/* Display the note in Recent Reports if it exists */}
+                                                    {(a.note || a.Note || a.notes || a.Notes) && <p className="text-[9px] text-slate-500 italic mt-1 bg-slate-50 px-2 py-1 rounded inline-block">{(a.note || a.Note || a.notes || a.Notes)}</p>}
+                                                </div>
+                                                <div className="text-[9px] font-black text-rose-500 bg-rose-50 px-2 py-1 rounded-lg uppercase whitespace-nowrap">{a.status}</div>
+                                            </div>
+                                        )) : (
+                                            <p className="text-center py-8 text-slate-400 text-xs font-bold italic">No recent absence reports</p>
+                                        )}
+                                    </div>
+                                </div>
                             </div>
                         )}
 
@@ -693,26 +713,6 @@
                                                 ))}
                                             </tbody>
                                         </table>
-                                    </div>
-                                </div>
-                                
-                                {/* Recent Reports block logic */}
-                                <div className="mt-8">
-                                    <h3 className="text-sm font-black text-slate-800 uppercase tracking-widest mb-4 px-2">Recent Absence Reports</h3>
-                                    <div className="space-y-3">
-                                        {recentReportsList.length > 0 ? recentReportsList.map((a, i) => (
-                                            <div key={i} className="flex justify-between items-center p-3 bg-white/70 backdrop-blur-sm rounded-2xl text-xs border border-white shadow-sm">
-                                                <div>
-                                                    <span className="font-bold text-slate-800">{a.studentName}</span>
-                                                    <p className="text-[9px] text-slate-400 font-bold mt-1">Session {a.session} • {a.activity}</p>
-                                                    {/* Display the note in Recent Reports if it exists */}
-                                                    {(a.note || a.Note || a.notes || a.Notes) && <p className="text-[9px] text-slate-500 italic mt-1 bg-slate-50 px-2 py-1 rounded inline-block">{(a.note || a.Note || a.notes || a.Notes)}</p>}
-                                                </div>
-                                                <div className="text-[9px] font-black text-rose-500 bg-rose-50 px-2 py-1 rounded-lg uppercase whitespace-nowrap">{a.status}</div>
-                                            </div>
-                                        )) : (
-                                            <p className="text-center py-8 text-slate-400 text-xs font-bold italic">No recent absence reports</p>
-                                        )}
                                     </div>
                                 </div>
                             </div>
