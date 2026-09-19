@@ -1,779 +1,534 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>DIAC Staff Hub</title>
-    
-    <link rel="icon" type="image/png" href="https://raw.githubusercontent.com/adamryan3976-glitch/DIAC26/main/diaclogo.png">
-    <link rel="apple-touch-icon" href="https://raw.githubusercontent.com/adamryan3976-glitch/DIAC26/main/diaclogo.png">
-    
-    <meta name="apple-mobile-web-app-capable" content="yes">
-    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+/**
+ * DIAC Staff Hub — backend
+ *
+ * Security model:
+ *  - Login verifies the Google ID token against Google's tokeninfo endpoint
+ *    (signature, audience, expiry, email_verified) — never decoded locally only.
+ *  - On success the server issues a signed session token (email|role|expiry + HMAC).
+ *  - EVERY subsequent call (reads and writes) must present a valid session token.
+ *    The token is verified server-side on every request, and email/role are taken
+ *    from the verified token — never from client-supplied values.
+ *  - HOC-only actions are enforced server-side, re-checked against the roster
+ *    (with a short cache) on every call, so removing someone from the staff list
+ *    revokes them immediately.
+ *  - Client-supplied strings that land in sheet cells are validated against
+ *    allowlists / known values and defused if they start with a formula trigger
+ *    character, to prevent formula injection.
+ *
+ * One-time setup (see setup checklist sent alongside this file):
+ *  1. Script Properties: set SESSION_SECRET to a long random string.
+ *  2. Add a "Note" header in column J of "App Attendance Absences".
+ *  3. Re-deploy as a new version (Deploy > Manage deployments > Edit > New version).
+ */
 
-    <script src="https://cdn.tailwindcss.com"></script>
-    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
-    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
-    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
-    <script src="https://unpkg.com/lucide@latest"></script>
-    
-    <!-- Google Identity Services Library -->
-    <script src="https://accounts.google.com/gsi/client" async defer></script>
-    
-    <style>
-        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=Gaegu:wght@400;700&display=swap');
-        
-        body { 
-            font-family: 'Inter', sans-serif; 
-            -webkit-tap-highlight-color: transparent; 
-            background-color: #f8fafc; 
-            margin: 0; 
-            overflow-x: hidden;
+const SS = SpreadsheetApp.getActiveSpreadsheet();
+
+const SESSION_TTL_MS = 12 * 60 * 60 * 1000; // 12 hours — a camp day plus buffer
+const STAFF_CACHE_TTL_SEC = 60;
+const READ_CACHE_TTL_SEC = 45;
+const GOOGLE_CLIENT_ID = "241712157669-1huukafbcpsifc4v35op6o80qjb10r0r.apps.googleusercontent.com";
+const ALLOWED_DOMAINS = ["ddsb.ca", "ddsb-diac.ca"];
+const ALLOWED_STATUSES = ["Present", "Absent - Unknown", "Absent - Excused", "Late", "Resolved", "Not Completed"];
+
+// ============================================================================
+// Entry points
+// ============================================================================
+
+function doGet(e) {
+  return handleRequest(e, 'GET');
+}
+
+function doPost(e) {
+  return handleRequest(e, 'POST');
+}
+
+function handleRequest(e, method) {
+  const action = e.parameter.action;
+  let data;
+
+  try {
+    if (action === 'login') {
+      data = checkLogin(e.parameter.token);
+      return respond(data);
+    }
+
+    // Every other action requires a valid session.
+    const auth = requireSession(e.parameter.session);
+    if (!auth.valid) {
+      return respond({ error: "Unauthorized: " + auth.error }, 401);
+    }
+
+    switch (action) {
+      case 'students':
+        data = withCache('students', () => getStudentData());
+        break;
+      case 'schedule':
+        data = withCache('schedule', () => getSheetData("Daily Schedule"));
+        break;
+      case 'absences':
+        data = withCache('absences', () => getSheetData("App Attendance Absences"));
+        break;
+      case 'classes':
+        data = withCache('classes', () => getClassesData());
+        break;
+      case 'attStudents':
+        data = withCache('attStudents', () => getAttendanceStudents());
+        break;
+      case 'massageSchedule':
+        data = withCache('massageSchedule', () => getMassageSchedule());
+        break;
+      case 'updateAbsence':
+        if (!auth.isHoc) {
+          data = { success: false, error: "Forbidden: HOC role required." };
+          return respond(data, 403);
         }
-
-        .whimsical-font { font-family: 'Gaegu', cursive; }
-        .animate-fade-in { animation: fadeIn 0.4s cubic-bezier(0.16, 1, 0.3, 1) forwards; }
-        @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
-        .no-scrollbar::-webkit-scrollbar { display: none; }
-        
-        .paint-splotch {
-            position: fixed;
-            z-index: -1;
-            filter: blur(60px);
-            opacity: 0.12;
-            pointer-events: none;
+        data = updateAbsenceStatus(e.parameter.id, e.parameter.status, e.parameter.note, auth.email);
+        invalidateCache('absences');
+        break;
+      case 'bulkReport': {
+        if (method !== 'POST') {
+          data = { success: false, error: "bulkReport requires POST." };
+          return respond(data, 405);
         }
-        .splotch-1 { top: -10%; left: -10%; width: 40vw; height: 40vw; background: #6366f1; border-radius: 40% 60% 70% 30% / 40% 50% 60% 50%; }
-        .splotch-2 { top: 40%; right: -15%; width: 50vw; height: 50vw; background: #ec4899; border-radius: 60% 40% 30% 70% / 50% 60% 40% 50%; }
-    </style>
-</head>
-<body>
-    <div class="paint-splotch splotch-1"></div>
-    <div class="paint-splotch splotch-2"></div>
+        const rawData = JSON.parse(e.parameter.data);
+        data = bulkReportAbsences(rawData, auth.email);
+        invalidateCache('absences');
+        break;
+      }
+      default:
+        data = { error: "Invalid action" };
+    }
+  } catch (err) {
+    data = { error: "Server error: " + err.toString() };
+  }
 
-    <div id="root"></div>
+  return respond(data);
+}
 
-    <script type="text/babel">
-        const { useState, useEffect, useMemo } = React;
+function respond(data) {
+  // ContentService responses from a web app can't set arbitrary HTTP status
+  // codes when called with mode:'no-cors' or via simple GET/POST from the
+  // front end, so errors are signaled in the JSON body (data.error /
+  // data.success === false) and the front end must check for them.
+  return ContentService.createTextOutput(JSON.stringify(data))
+    .setMimeType(ContentService.MimeType.JSON);
+}
 
-        const SCRIPT_URL = "https://script.google.com/macros/s/AKfycbyLa9VEQWwPR_yTU50r09f-X_PHMyOxFV4cOqyuZvLOuu861OiTfwrsp8a6Z6RnYOre/exec";
-        const APP_LOGO_URL = "https://raw.githubusercontent.com/adamryan3976-glitch/DIAC26/main/diaclogo.png";
-        const PAGE_SIZE = 100;
-        const GOOGLE_CLIENT_ID = "241712157669-1huukafbcpsifc4v35op6o80qjb10r0r.apps.googleusercontent.com";
+// ============================================================================
+// Authentication: login
+// ============================================================================
 
-        const Icon = ({ name, size = 20, className = "" }) => {
-            useEffect(() => { if (window.lucide) window.lucide.createIcons(); }, [name]);
-            return <i data-lucide={name} style={{ width: size, height: size }} className={className}></i>;
-        };
+/**
+ * Validates the Google SSO ID token via Google's tokeninfo endpoint (real
+ * signature verification, not a local decode), checks audience + domain,
+ * looks up the caller on the staff roster, and issues a signed session token.
+ */
+function checkLogin(token) {
+  if (!token) {
+    return { success: false, error: "Missing authentication credentials." };
+  }
 
-        const getDirectDriveUrl = (url) => {
-            if (!url) return null;
-            const s = String(url);
-            if (s.includes('drive.google.com')) {
-                let id = "";
-                if (s.includes('id=')) { id = s.split('id=')[1].split('&')[0]; } 
-                else if (s.includes('/file/d/')) { id = s.split('/file/d/')[1].split('/')[0]; }
-                return id ? `https://lh3.googleusercontent.com/d/${id}=s400` : s;
-            }
-            return s;
-        };
+  try {
+    const response = UrlFetchApp.fetch(
+      "https://oauth2.googleapis.com/tokeninfo?id_token=" + encodeURIComponent(token),
+      { muteHttpExceptions: true }
+    );
+    if (response.getResponseCode() !== 200) {
+      return { success: false, error: "Invalid or expired Google session. Please sign in again." };
+    }
+    const payload = JSON.parse(response.getContentText());
 
-        function App() {
-            const [isAuthenticated, setIsAuthenticated] = useState(false);
-            const [isHoc, setIsHoc] = useState(false);
-            const [currentUser, setCurrentUser] = useState('');
-            const [authError, setAuthError] = useState('');
-            const [isLoggingIn, setIsLoggingIn] = useState(false);
-            const [sessionToken, setSessionToken] = useState('');
-            const [fetchError, setFetchError] = useState('');
-            const [submitError, setSubmitError] = useState('');
+    if (!payload || !payload.email) {
+      return { success: false, error: "Failed to extract SSO identity." };
+    }
+    if (payload.aud !== GOOGLE_CLIENT_ID) {
+      return { success: false, error: "Token was not issued for this application." };
+    }
+    if (String(payload.email_verified).toLowerCase() !== 'true') {
+      return { success: false, error: "Email address is not verified with Google." };
+    }
 
-            const [activeTab, setActiveTab] = useState('students');
-            const [searchQuery, setSearchQuery] = useState('');
-            const [students, setStudents] = useState([]);
-            const [schedule, setSchedule] = useState([]);
-            const [absences, setAbsences] = useState([]); 
-            const [classes, setClasses] = useState({ S1: [], S2: [], S3: [], S4: [] });
-            const [attStudents, setAttStudents] = useState([]);
-            const [massageSchedule, setMassageSchedule] = useState([]);
-            
-            const [loading, setLoading] = useState(true);
-            const [selectedStudent, setSelectedStudent] = useState(null);
-            const [refreshing, setRefreshing] = useState(false);
-            const [lastUpdated, setLastUpdated] = useState(null);
+    const emailToCheck = payload.email.trim().toLowerCase();
+    const hostedDomain = (payload.hd || '').trim().toLowerCase();
 
-            const [attSession, setAttSession] = useState('1');
-            const [attActivity, setAttActivity] = useState('');
-            const [currentPage, setCurrentPage] = useState(1);
-            
-            const [localAttendance, setLocalAttendance] = useState({});
-            const [isSubmitting, setIsSubmitting] = useState(false);
-            const [hocSyncingId, setHocSyncingId] = useState(null);
+    const isDomainAllowed = ALLOWED_DOMAINS.includes(hostedDomain) ||
+      ALLOWED_DOMAINS.some(domain => emailToCheck.endsWith("@" + domain));
 
-            const [hocSession, setHocSession] = useState('1');
-            const [hocNotes, setHocNotes] = useState({}); // Stores the active notes typed by HOC
+    if (!isDomainAllowed) {
+      return {
+        success: false,
+        error: "Access Denied: You must sign in using your official school board account."
+      };
+    }
 
-            useEffect(() => {
-                const user = localStorage.getItem('diac_user');
-                const hoc = localStorage.getItem('diac_hoc');
-                const session = localStorage.getItem('diac_session');
-                if (user && session) {
-                    setIsAuthenticated(true);
-                    setCurrentUser(user);
-                    setIsHoc(hoc === 'true');
-                    setSessionToken(session);
-                    fetchData(session);
-                } else { setLoading(false); }
-            }, []);
+    const staff = lookupStaff(emailToCheck);
+    if (!staff) {
+      return {
+        success: false,
+        error: "Access Denied: Email address '" + emailToCheck + "' is not on the authorized App Staff List."
+      };
+    }
 
-            const logout = () => {
-                localStorage.removeItem('diac_user');
-                localStorage.removeItem('diac_hoc');
-                localStorage.removeItem('diac_session');
-                window.location.reload();
-            };
+    const session = createSessionToken(emailToCheck, staff.isHoc);
+    return { success: true, email: emailToCheck, isHoc: staff.isHoc, session: session };
 
-            // Initialize Google SSO Login Interface
-            useEffect(() => {
-                if (isAuthenticated) return;
-                
-                const initGis = () => {
-                    if (typeof google !== 'undefined') {
-                        google.accounts.id.initialize({
-                            client_id: GOOGLE_CLIENT_ID,
-                            callback: handleGoogleSsoCallback
-                        });
-                        
-                        google.accounts.id.renderButton(
-                            document.getElementById("googleBtnContainer"),
-                            { theme: "filled_blue", size: "large", width: "280", text: "signin_with" }
-                        );
-                    } else {
-                        setTimeout(initGis, 500);
-                    }
-                };
-                initGis();
-            }, [isAuthenticated]);
+  } catch (err) {
+    return { success: false, error: "Google SSO verification failed: " + err.toString() };
+  }
+}
 
-            const handleGoogleSsoCallback = async (response) => {
-                setIsLoggingIn(true);
-                setAuthError('');
-                try {
-                    const res = await fetch(`${SCRIPT_URL}?action=login&token=${response.credential}`);
-                    const data = await res.json();
-                    
-                    if (data.success) {
-                        localStorage.setItem('diac_user', data.email);
-                        localStorage.setItem('diac_hoc', String(data.isHoc));
-                        localStorage.setItem('diac_session', data.session);
-                        setIsAuthenticated(true);
-                        setCurrentUser(data.email);
-                        setIsHoc(data.isHoc);
-                        setSessionToken(data.session);
-                        fetchData(data.session);
-                    } else {
-                        setAuthError(data.error || "Login Failed");
-                    }
-                } catch (e) {
-                    setAuthError("Connection Error");
-                } finally {
-                    setIsLoggingIn(false);
-                }
-            };
+/**
+ * Looks up a staff email on "App Staff List" (Column A: email, Column F: isHoc).
+ * Cached briefly so a busy login burst doesn't hammer the sheet, but short
+ * enough that removing someone from the roster takes effect within a minute.
+ */
+function lookupStaff(emailLower) {
+  const cache = CacheService.getScriptCache();
+  const cacheKey = 'staff_' + emailLower;
+  const cached = cache.get(cacheKey);
+  if (cached !== null) {
+    return cached === '__none__' ? null : JSON.parse(cached);
+  }
 
-            const fetchData = async (tokenOverride) => {
-                const token = tokenOverride || sessionToken;
-                if (!token) return;
-                setRefreshing(true);
-                setFetchError('');
-                try {
-                    const endpoints = ['students', 'schedule', 'absences', 'classes', 'attStudents', 'massageSchedule'];
-                    const results = await Promise.all(
-                        endpoints.map(ep =>
-                            fetch(`${SCRIPT_URL}?action=${ep}&session=${encodeURIComponent(token)}`)
-                                .then(r => r.json())
-                                .catch(() => ({ error: 'network' }))
-                        )
-                    );
+  const sheet = SS.getSheetByName("App Staff List");
+  if (!sheet) throw new Error("Database authentication node offline.");
 
-                    if (results.some(r => r && typeof r.error === 'string' && r.error.startsWith('Unauthorized'))) {
-                        setFetchError('Your session expired. Please sign in again.');
-                        logout();
-                        return;
-                    }
+  const data = sheet.getDataRange().getValues();
+  let result = null;
+  for (let i = 1; i < data.length; i++) {
+    const rowEmail = String(data[i][0]).toLowerCase().trim();
+    if (rowEmail === emailLower) {
+      result = { isHoc: String(data[i][5]).toUpperCase() === "TRUE" };
+      break;
+    }
+  }
 
-                    const failed = results.some(r => !r || r.error);
-                    if (failed) {
-                        setFetchError('Could not refresh data — showing the last version loaded. Check your connection and try again.');
-                    }
+  cache.put(cacheKey, result ? JSON.stringify(result) : '__none__', STAFF_CACHE_TTL_SEC);
+  return result;
+}
 
-                    if (results[0] && !results[0].error) setStudents(results[0]);
-                    if (results[1] && !results[1].error) setSchedule(results[1]);
-                    if (results[2] && !results[2].error) {
-                        setAbsences(results[2]);
-                        const initialLocal = {};
-                        const today = new Date().toDateString();
-                        results[2].forEach(abs => {
-                            const absDate = new Date(abs.timestamp).toDateString();
-                            if (absDate === today) {
-                                initialLocal[`${abs.studentName}-${abs.session}-${abs.activity}`] = abs.status;
-                            }
-                        });
-                        setLocalAttendance(prev => ({...prev, ...initialLocal}));
-                    }
-                    if (results[3] && !results[3].error) setClasses(results[3]);
-                    if (results[4] && !results[4].error) setAttStudents(results[4]);
-                    if (results[5] && !results[5].error) setMassageSchedule(results[5]);
+// ============================================================================
+// Session tokens (HMAC-signed, server-verified on every call)
+// ============================================================================
 
-                    if (!failed) {
-                        setLastUpdated(new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }));
-                    }
-                } catch (e) {
-                    setFetchError('Could not refresh data — showing the last version loaded. Check your connection and try again.');
-                }
-                finally { setLoading(false); setRefreshing(false); setHocSyncingId(null); }
-            };
+function getSessionSecret() {
+  const secret = PropertiesService.getScriptProperties().getProperty('SESSION_SECRET');
+  if (!secret) {
+    throw new Error("SESSION_SECRET is not configured in Script Properties. See setup checklist.");
+  }
+  return secret;
+}
 
-            const stageStatusChange = (studentName, newStatus) => {
-                const key = `${studentName}-${attSession}-${attActivity}`;
-                setLocalAttendance(prev => ({ ...prev, [key]: newStatus }));
-            };
+function createSessionToken(email, isHoc) {
+  const expiry = Date.now() + SESSION_TTL_MS;
+  const payload = email + '|' + (isHoc ? '1' : '0') + '|' + expiry;
+  const sig = signPayload(payload);
+  return Utilities.base64EncodeWebSafe(payload) + '.' + sig;
+}
 
-            const handleNoteChange = (id, text) => {
-                setHocNotes(prev => ({ ...prev, [id]: text }));
-            };
+function signPayload(payload) {
+  const secret = getSessionSecret();
+  const rawSig = Utilities.computeHmacSha256Signature(payload, secret);
+  return Utilities.base64EncodeWebSafe(rawSig);
+}
 
-            const handleHocUpdate = async (studentName, currentAbsence, newStatus, noteText) => {
-                setHocSyncingId(currentAbsence.id);
-                setFetchError('');
-                try {
-                    const res = await fetch(SCRIPT_URL, {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-                        body: new URLSearchParams({
-                            action: 'updateAbsence',
-                            session: sessionToken,
-                            id: currentAbsence.id,
-                            status: newStatus,
-                            note: noteText || ''
-                        })
-                    });
-                    const data = await res.json();
-                    if (!data || data.success !== true) {
-                        setFetchError((data && data.error) || 'Could not save that update. Please try again.');
-                        setHocSyncingId(null);
-                        return;
-                    }
-                    const key = `${studentName}-${currentAbsence.session}-${currentAbsence.activity}`;
-                    setLocalAttendance(prev => ({...prev, [key]: newStatus}));
-                    await fetchData();
-                } catch (e) {
-                    setFetchError('Could not save that update — check your connection and try again.');
-                    setHocSyncingId(null);
-                }
-            };
+/**
+ * Verifies a session token's signature and expiry, then re-checks the
+ * caller's HOC status against the live roster (cached briefly) rather than
+ * trusting the flag embedded in the token — so a demotion takes effect
+ * without waiting for the token to expire.
+ */
+function requireSession(token) {
+  if (!token) return { valid: false, error: "No session provided. Please sign in again." };
 
-            const handleSubmitAttendance = async () => {
-                setIsSubmitting(true);
-                setSubmitError('');
-                const updates = [];
-                const today = new Date().toDateString();
-                
-                enrolledInCurrent.forEach(s => {
-                    const name = s.displayName;
-                    const key = `${name}-${attSession}-${attActivity}`;
-                    const status = localAttendance[key] || 'Not Completed';
-                    
-                    const existing = absences.find(a => {
-                        const absDate = new Date(a.timestamp).toDateString();
-                        return a.studentName === name && 
-                               String(a.session) === String(attSession) && 
-                               a.activity === attActivity &&
-                               absDate === today;
-                    });
+  let payload;
+  try {
+    payload = Utilities.newBlob(Utilities.base64DecodeWebSafe(token.split('.')[0])).getDataAsString();
+  } catch (e) {
+    return { valid: false, error: "Malformed session." };
+  }
 
-                    if (status !== 'Not Completed' || existing) {
-                        const studentData = students.find(st => st.preferredName === name);
-                        updates.push({
-                            id: existing ? existing.id : null,
-                            studentId: studentData ? studentData.stuNum : '000',
-                            studentName: name,
-                            cabin: studentData ? studentData.cabin : 'Unknown',
-                            session: attSession,
-                            activity: attActivity,
-                            status: status,
-                            reportedBy: currentUser
-                        });
-                    }
-                });
+  const parts = token.split('.');
+  if (parts.length !== 2) return { valid: false, error: "Malformed session." };
+  const sig = parts[1];
 
-                try {
-                    const res = await fetch(SCRIPT_URL, {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-                        body: new URLSearchParams({
-                            action: 'bulkReport',
-                            session: sessionToken,
-                            data: JSON.stringify(updates)
-                        })
-                    });
-                    const data = await res.json();
-                    if (!data || data.success !== true) {
-                        setSubmitError((data && data.error) || 'Could not save attendance. Please try again.');
-                        setIsSubmitting(false);
-                        return;
-                    }
-                    await fetchData();
-                } catch (e) {
-                    setSubmitError('Could not save attendance — check your connection and try again.');
-                } finally {
-                    setIsSubmitting(false);
-                }
-            };
+  const expectedSig = signPayload(payload);
+  if (sig !== expectedSig) {
+    return { valid: false, error: "Invalid session signature." };
+  }
 
-            const sortedArtists = useMemo(() => {
-                if (!Array.isArray(students)) return [];
-                return [...students].sort((a, b) => {
-                    const lastA = String(a.lastName || "").toLowerCase();
-                    const lastB = String(b.lastName || "").toLowerCase();
-                    if (lastA !== lastB) return lastA.localeCompare(lastB);
-                    return String(a.firstName || "").toLowerCase().localeCompare(String(b.firstName || "").toLowerCase());
-                });
-            }, [students]);
+  const fields = payload.split('|');
+  if (fields.length !== 3) return { valid: false, error: "Malformed session." };
+  const email = fields[0];
+  const expiry = Number(fields[2]);
 
-            const filteredStudents = useMemo(() => {
-                const query = searchQuery.toLowerCase().trim();
-                return sortedArtists.filter(s => 
-                    String(s.preferredName || "").toLowerCase().includes(query) || 
-                    String(s.firstName || "").toLowerCase().includes(query) || 
-                    String(s.lastName || "").toLowerCase().includes(query)
-                );
-            }, [sortedArtists, searchQuery]);
+  if (!expiry || Date.now() > expiry) {
+    return { valid: false, error: "Session expired. Please sign in again." };
+  }
 
-            const totalPages = Math.max(1, Math.ceil(filteredStudents.length / PAGE_SIZE));
-            const pagedStudents = useMemo(() => {
-                const start = (currentPage - 1) * PAGE_SIZE;
-                return filteredStudents.slice(start, start + PAGE_SIZE);
-            }, [filteredStudents, currentPage]);
+  const staff = lookupStaff(email);
+  if (!staff) {
+    return { valid: false, error: "You are no longer on the authorized staff list." };
+  }
 
-            const enrolledInCurrent = useMemo(() => {
-                if (!attActivity || !Array.isArray(attStudents)) return [];
-                const sessKey = `S${attSession}`;
-                return attStudents.filter(s => s[sessKey] === attActivity);
-            }, [attStudents, attActivity, attSession]);
+  return { valid: true, email: email, isHoc: staff.isHoc };
+}
 
-            const hasUnsavedChanges = useMemo(() => {
-                const today = new Date().toDateString();
-                return enrolledInCurrent.some(s => {
-                    const name = s.displayName;
-                    const key = `${name}-${attSession}-${attActivity}`;
-                    const localStatus = localAttendance[key] || 'Not Completed';
-                    const serverAbsence = absences.find(a => 
-                        a.studentName === name && 
-                        String(a.session) === String(attSession) && 
-                        a.activity === attActivity &&
-                        new Date(a.timestamp).toDateString() === today
-                    );
-                    const serverStatus = serverAbsence ? serverAbsence.status : 'Not Completed';
-                    return localStatus !== serverStatus;
-                });
-            }, [enrolledInCurrent, localAttendance, absences, attSession, attActivity]);
+// ============================================================================
+// Read-side caching (short TTL; invalidated on writes)
+// ============================================================================
 
-            const groupedMassage = useMemo(() => {
-                if (!Array.isArray(massageSchedule)) return [];
-                const groups = [];
-                const byDay = {};
-                massageSchedule.forEach(entry => {
-                    const dayKey = entry.day || 'Unscheduled';
-                    if (!byDay[dayKey]) {
-                        byDay[dayKey] = { day: dayKey, entries: [] };
-                        groups.push(byDay[dayKey]);
-                    }
-                    byDay[dayKey].entries.push(entry);
-                });
-                return groups;
-            }, [massageSchedule]);
+function withCache(key, fn) {
+  const cache = CacheService.getScriptCache();
+  const cached = cache.get('data_' + key);
+  if (cached !== null) return JSON.parse(cached);
 
-            const DetailRow = ({ label, value, icon }) => (
-                <div className="flex items-start gap-4 p-4 bg-white/70 backdrop-blur-sm rounded-2xl border border-white shadow-sm">
-                    <div className="p-2 bg-indigo-50 text-indigo-600 rounded-xl shrink-0"><Icon name={icon} size={18} /></div>
-                    <div>
-                        <div className="text-[10px] font-black text-slate-400 uppercase tracking-widest">{label}</div>
-                        <div className="text-sm font-bold text-slate-900">{value || 'N/A'}</div>
-                    </div>
-                </div>
-            );
+  const result = fn();
+  try {
+    cache.put('data_' + key, JSON.stringify(result), READ_CACHE_TTL_SEC);
+  } catch (e) {
+    // Result too large to cache — fine, just skip caching it.
+  }
+  return result;
+}
 
-            const Pagination = ({ pos }) => (
-                <div className={`flex items-center justify-between bg-white px-4 py-3 rounded-2xl border border-slate-200 shadow-sm ${pos === 'top' ? 'mb-4' : 'mt-4'}`}>
-                    <button disabled={currentPage === 1} onClick={() => {setCurrentPage(p => p - 1); window.scrollTo(0,0);}} className="p-2 disabled:opacity-20 text-indigo-600"><Icon name="chevron-left" /></button>
-                    <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Page {currentPage} / {totalPages}</span>
-                    <button disabled={currentPage >= totalPages} onClick={() => {setCurrentPage(p => p + 1); window.scrollTo(0,0);}} className="p-2 disabled:opacity-20 text-indigo-600"><Icon name="chevron-right" /></button>
-                </div>
-            );
+function invalidateCache(key) {
+  CacheService.getScriptCache().remove('data_' + key);
+}
 
-            if (loading) return (
-                <div className="min-h-screen flex flex-col items-center justify-center bg-white gap-4">
-                    <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-indigo-600"></div>
-                    <p className="whimsical-font text-slate-400 font-bold uppercase text-[10px] tracking-widest">DIAC HUB LOADING...</p>
-                </div>
-            );
+// ============================================================================
+// Input validation / formula-injection defense
+// ============================================================================
 
-            if (!isAuthenticated) return (
-                <div className="min-h-screen flex items-center justify-center p-6 bg-transparent relative z-10">
-                    <div className="w-full max-w-sm space-y-6 animate-fade-in bg-white/80 backdrop-blur-xl p-8 rounded-3xl shadow-xl border border-white/50">
-                        <div className="text-center">
-                            <img src={APP_LOGO_URL} className="w-20 mx-auto mb-4" />
-                            <h1 className="text-3xl font-black text-indigo-600 whimsical-font italic uppercase text-center">DIAC HUB</h1>
-                        </div>
-                        <div className="space-y-4 pt-4">
-                            <p className="text-xs text-slate-500 font-medium text-center">
-                                Secure single sign-on access. Please use your official school board Google credentials to verify.
-                            </p>
-                            <div className="flex justify-center py-4">
-                                <div id="googleBtnContainer"></div>
-                            </div>
-                            {isLoggingIn && <p className="text-indigo-500 text-xs font-bold text-center animate-pulse">Verifying credentials...</p>}
-                            {authError && <p className="text-rose-500 text-xs font-bold text-center px-2">{authError}</p>}
-                        </div>
-                    </div>
-                </div>
-            );
+function sanitizeCell(value) {
+  if (typeof value !== 'string') return value;
+  if (/^[=+\-@]/.test(value)) {
+    return "'" + value; // neutralize as text, matches common spreadsheet defense
+  }
+  return value;
+}
 
-            // Filter for HOC Tab: Only show if NOT present
-            const activeHocAbsences = absences.filter(a => 
-                String(a.session) === String(hocSession) && 
-                new Date(a.timestamp).toDateString() === new Date().toDateString() &&
-                a.status !== 'Present'
-            );
+function validateStatus(status) {
+  return ALLOWED_STATUSES.includes(status) ? status : null;
+}
 
-            // Filter for Recent Reports block
-            const recentReportsList = [...absences]
-                .filter(a => a.status !== 'Present')
-                .reverse()
-                .slice(0, 10);
+// ============================================================================
+// Data access
+// ============================================================================
 
-            if (selectedStudent) return (
-                <div className="min-h-screen bg-transparent animate-fade-in pb-12">
-                    <header className="bg-slate-900/90 backdrop-blur-md text-white p-5 sticky top-0 z-50 flex items-center gap-4">
-                        <button onClick={() => setSelectedStudent(null)} className="p-2"><Icon name="arrow-left" /></button>
-                        <h1 className="text-lg font-bold truncate whimsical-font">{selectedStudent.preferredName}</h1>
-                    </header>
-                    <div className="p-4 max-w-2xl mx-auto space-y-4">
-                        <div className="bg-white/80 backdrop-blur-md p-6 rounded-[2.5rem] shadow-sm border border-white text-center">
-                            <div className="w-28 h-28 rounded-[2rem] overflow-hidden shadow-inner mx-auto bg-slate-100 flex items-center justify-center border-4 border-white mb-4">
-                                {selectedStudent.photo ? <img src={getDirectDriveUrl(selectedStudent.photo)} className="w-full h-full object-cover" /> : <Icon name="user" size={40} className="text-slate-300" />}
-                            </div>
-                            <h2 className="text-2xl font-black text-slate-800 leading-tight">{selectedStudent.preferredName}</h2>
-                            <div className="flex flex-wrap justify-center gap-2 mt-3">
-                                <span className="px-3 py-1 bg-indigo-50 text-indigo-600 rounded-full text-[10px] font-black uppercase">{selectedStudent.pronouns}</span>
-                                <span className="px-3 py-1 bg-slate-900 text-white rounded-full text-[10px] font-black uppercase">{selectedStudent.cabin}</span>
-                                <span className="px-3 py-1 bg-slate-100 text-slate-500 rounded-full text-[10px] font-black uppercase">{selectedStudent.grade}</span>
-                            </div>
-                        </div>
-                        <div className="grid gap-3">
-                            <DetailRow label="School" value={selectedStudent.school} icon="school" />
-                            <DetailRow label="Birth Date" value={selectedStudent.birthDate} icon="calendar" />
-                            <DetailRow label="Dietary Restrictions" value={selectedStudent.dietary} icon="utensils" />
-                            <DetailRow label="Allergies" value={selectedStudent.allergies} icon="alert-circle" />
-                            <div className="px-4 py-2 text-[10px] font-black text-slate-400 uppercase tracking-widest mt-2">Guardian Contact</div>
-                            <DetailRow label="Guardian" value={`${selectedStudent.guardianFirstName} ${selectedStudent.guardianLastName}`} icon="users" />
-                            <DetailRow label="Phone" value={selectedStudent.guardianPhone} icon="phone" />
-                            <DetailRow label="Guardian Email" value={selectedStudent.guardianEmail} icon="mail" />
-                            <DetailRow label="Preferred Email" value={selectedStudent.preferredEmail} icon="at-sign" />
-                            <div className="px-4 py-2 text-[10px] font-black text-slate-400 uppercase tracking-widest mt-2">Activity Schedule</div>
-                            <DetailRow label="Session 1" value={`${selectedStudent.s1Activity} @ ${selectedStudent.s1Venue}`} icon="star" />
-                            <DetailRow label="Session 2" value={`${selectedStudent.s2Activity} @ ${selectedStudent.s2Venue}`} icon="star" />
-                            <DetailRow label="Session 3" value={`${selectedStudent.s3Activity} @ ${selectedStudent.s3Venue}`} icon="star" />
-                            <DetailRow label="Session 4" value={`${selectedStudent.s4Activity} @ ${selectedStudent.s4Venue}`} icon="star" />
-                        </div>
-                    </div>
-                </div>
-            );
+function getStudentData() {
+  const sheet = SS.getSheetByName("Student App Data");
+  const data = sheet.getDataRange().getValues();
 
-            return (
-                <div className="min-h-screen bg-transparent pb-24">
-                    <header className="bg-slate-900/90 backdrop-blur-md text-white p-5 sticky top-0 z-50 flex justify-between items-center">
-                        <h1 className="text-xl font-black whimsical-font italic tracking-tighter">DIAC HUB</h1>
-                        <button onClick={fetchData} className={`p-2 bg-slate-800 rounded-xl ${refreshing ? 'animate-spin' : ''}`}><Icon name="refresh-cw" size={18}/></button>
-                    </header>
+  return data.slice(1).map(row => ({
+    firstName: row[0],
+    lastName: row[1],
+    birthDate: formatDate(row[3]),
+    pronouns: row[5],
+    cabin: row[6],
+    guardianFirstName: row[7],
+    guardianLastName: row[8],
+    guardianPhone: row[9],
+    guardianEmail: row[10],
+    preferredEmail: row[11],
+    grade: row[12],
+    school: row[13],
+    photo: row[14],
+    dietary: row[15],
+    allergies: row[16],
+    s1Activity: row[17],
+    s1Venue: row[18],
+    s2Activity: row[19],
+    s2Venue: row[20],
+    s3Activity: row[21],
+    s3Venue: row[22],
+    s4Activity: row[23],
+    s4Venue: row[24],
+    preferredName: row[27] || (row[0] + " " + row[1]),
+    stuNum: String(row[0] + row[1])
+  }));
+}
 
-                    <main className="p-4 max-w-xl mx-auto space-y-4">
-                        {fetchError && (
-                            <div className="bg-rose-50 border border-rose-200 text-rose-600 text-xs font-bold p-3 rounded-2xl flex items-center gap-2 animate-fade-in">
-                                <Icon name="alert-triangle" size={16} />
-                                <span>{fetchError}</span>
-                            </div>
-                        )}
-                        {lastUpdated && !fetchError && (
-                            <div className="text-center text-[9px] font-bold text-slate-400 uppercase tracking-widest">Updated {lastUpdated}</div>
-                        )}
-                        <nav className="flex bg-white/70 backdrop-blur-md p-1 rounded-2xl shadow-sm border border-white overflow-x-auto no-scrollbar">
-                            {['students', 'attendance', 'hoc', 'schedule', 'massage'].map(tab => (
-                                (tab !== 'hoc' || isHoc) &&
-                                <button key={tab} onClick={() => setActiveTab(tab)} className={`flex-1 min-w-[90px] py-3 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all ${activeTab === tab ? 'bg-indigo-600 text-white shadow-md' : 'text-slate-400'}`}>
-                                    {tab === 'students' ? 'Artists' : (tab === 'massage' ? 'Massage' : tab)}
-                                </button>
-                            ))}
-                        </nav>
+function getClassesData() {
+  const sheet = SS.getSheetByName("App Classes");
+  const data = sheet.getDataRange().getValues();
+  const result = { S1: [], S2: [], S3: [], S4: [] };
 
-                        {activeTab === 'students' && (
-                            <div className="space-y-4 animate-fade-in">
-                                <div className="relative">
-                                    <Icon name="search" size={18} className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-300" />
-                                    <input type="text" placeholder="Search Artists..." className="w-full bg-white/70 backdrop-blur-sm border border-white p-4 pl-12 rounded-3xl shadow-sm outline-none font-medium text-sm" value={searchQuery} onChange={e => {setSearchQuery(e.target.value); setCurrentPage(1);}} />
-                                </div>
-                                <Pagination pos="top" />
-                                <div className="grid gap-2">
-                                    {pagedStudents.map((s, idx) => (
-                                        <button key={idx} onClick={() => setSelectedStudent(s)} className="bg-white/60 backdrop-blur-sm p-4 rounded-2xl border border-white flex items-center justify-between w-full shadow-sm text-left">
-                                            <div className="flex items-center gap-4">
-                                                <div className="w-12 h-12 rounded-2xl bg-slate-50 flex items-center justify-center border border-slate-100 overflow-hidden shadow-sm">
-                                                    {s.photo ? <img src={getDirectDriveUrl(s.photo)} className="w-full h-full object-cover" /> : <Icon name="user" className="text-slate-200" size={20} />}
-                                                </div>
-                                                <div>
-                                                    <div className="font-bold text-slate-900 text-sm leading-tight">{s.preferredName}</div>
-                                                    <div className="text-[9px] text-slate-400 font-bold uppercase mt-0.5">{s.cabin}</div>
-                                                </div>
-                                            </div>
-                                            <Icon name="chevron-right" size={16} className="text-slate-200" />
-                                        </button>
-                                    ))}
-                                </div>
-                                <Pagination pos="bottom" />
-                            </div>
-                        )}
+  for (let col = 0; col < 4; col++) {
+    for (let row = 1; row < data.length; row++) {
+      if (data[row][col]) result[`S${col + 1}`].push(data[row][col]);
+    }
+  }
+  return result;
+}
 
-                        {activeTab === 'attendance' && (
-                            <div className="space-y-4 animate-fade-in">
-                                <div className="bg-white/70 backdrop-blur-md p-6 rounded-[2rem] border border-white shadow-sm space-y-4">
-                                    <div className="flex gap-2">
-                                        {[1, 2, 3, 4].map(num => (
-                                            <button key={num} onClick={() => {setAttSession(num.toString()); setAttActivity('');}} className={`flex-1 py-3 rounded-xl text-[10px] font-black border transition-all ${attSession === num.toString() ? 'bg-indigo-600 border-indigo-600 text-white shadow-md' : 'bg-slate-50 border-slate-100 text-slate-400'}`}>S{num}</button>
-                                        ))}
-                                    </div>
-                                    <div className="relative">
-                                        <select className="w-full bg-white border border-slate-100 p-4 rounded-2xl text-sm outline-none font-bold text-slate-600" value={attActivity} onChange={e => setAttActivity(e.target.value)}>
-                                            <option value="">Choose Activity</option>
-                                            {(classes[`S${attSession}`] || []).map((c, i) => <option key={i} value={c}>{c}</option>)}
-                                        </select>
-                                    </div>
-                                </div>
+/**
+ * Reads the "Massage Appts" tab. Columns are Day / Time / Appt (name) / Email
+ * (a 5th "Notes" column shows up on at least one row in the source sheet and
+ * is intentionally ignored here). The Day column uses merged cells in the
+ * sheet, which Sheets reports as blank for every row after the first in the
+ * merge — so the day is carried forward until a new one appears. Only name
+ * and time are returned; email addresses are left out of the app response
+ * even though the column exists.
+ */
+function getMassageSchedule() {
+  const sheet = SS.getSheetByName("Massage Appts");
+  if (!sheet) return [];
 
-                                {attActivity && (
-                                    <div className="space-y-4">
-                                        <button 
-                                            disabled={isSubmitting || !hasUnsavedChanges}
-                                            onClick={handleSubmitAttendance}
-                                            className={`w-full font-black py-4 rounded-2xl shadow-lg flex items-center justify-center gap-2 sticky top-24 z-40 animate-fade-in ${hasUnsavedChanges ? 'bg-emerald-600 text-white' : 'bg-slate-200 text-slate-400 opacity-50'}`}
-                                        >
-                                            <Icon name={isSubmitting ? "loader" : "save"} className={isSubmitting ? "animate-spin" : ""} />
-                                            {isSubmitting ? 'SYNCING...' : 'SUBMIT ATTENDANCE'}
-                                        </button>
-                                        {submitError && (
-                                            <div className="bg-rose-50 border border-rose-200 text-rose-600 text-xs font-bold p-3 rounded-2xl flex items-center gap-2 animate-fade-in">
-                                                <Icon name="alert-triangle" size={16} />
-                                                <span>{submitError}</span>
-                                            </div>
-                                        )}
+  const data = sheet.getDataRange().getValues();
+  const tz = Session.getScriptTimeZone();
+  let currentDay = '';
+  const result = [];
 
-                                        <div className="space-y-3">
-                                            {enrolledInCurrent.map((s, i) => {
-                                                const name = s.displayName;
-                                                const key = `${name}-${attSession}-${attActivity}`;
-                                                const currentStatus = localAttendance[key] || 'Not Completed';
-                                                
-                                                const today = new Date().toDateString();
-                                                const serverAbsence = absences.find(a => 
-                                                    a.studentName === name && 
-                                                    String(a.session) === String(attSession) && 
-                                                    a.activity === attActivity &&
-                                                    new Date(a.timestamp).toDateString() === today
-                                                );
-                                                const serverStatus = serverAbsence ? serverAbsence.status : 'Not Completed';
-                                                const isSyncing = isSubmitting && currentStatus !== serverStatus;
+  for (let i = 1; i < data.length; i++) { // skip header row
+    const row = data[i];
+    const dayCell = formatMassageCell(row[0], tz, false);
+    const timeCell = formatMassageCell(row[1], tz, true);
+    const nameCell = String(row[2] || '').trim();
 
-                                                const options = [
-                                                    { label: 'Present', val: 'Present', color: 'bg-emerald-500 text-white border-emerald-500' },
-                                                    { label: 'Absent', val: 'Absent - Unknown', color: 'bg-rose-500 text-white border-rose-500' },
-                                                    { label: 'Excused', val: 'Absent - Excused', color: 'bg-amber-500 text-white border-amber-500' },
-                                                    { label: 'Late', val: 'Late', color: 'bg-indigo-500 text-white border-indigo-500' }
-                                                ];
+    if (dayCell) currentDay = dayCell;
+    if (!timeCell && !nameCell) continue; // skip blank/separator rows
 
-                                                return (
-                                                    <div key={i} className={`bg-white/80 backdrop-blur-sm p-4 rounded-3xl border shadow-sm transition-all ${currentStatus === 'Not Completed' ? 'border-amber-200' : 'border-slate-100'}`}>
-                                                        <div className="font-bold text-slate-800 text-sm mb-3 px-1">{name}</div>
-                                                        <div className="grid grid-cols-4 gap-1.5">
-                                                            {isSyncing ? (
-                                                                <div className="col-span-4 py-3 rounded-xl text-[10px] font-black uppercase text-center bg-slate-50 text-slate-400 animate-pulse">Syncing...</div>
-                                                            ) : (
-                                                                options.map(opt => (
-                                                                    <button
-                                                                        key={opt.val}
-                                                                        onClick={() => stageStatusChange(name, currentStatus === opt.val ? 'Not Completed' : opt.val)}
-                                                                        className={`py-2.5 rounded-xl text-[9px] font-black uppercase border transition-all ${currentStatus === opt.val ? opt.color : 'bg-slate-50 border-slate-100 text-slate-400'}`}
-                                                                    >
-                                                                        {opt.label}
-                                                                    </button>
-                                                                ))
-                                                            )}
-                                                        </div>
-                                                    </div>
-                                                );
-                                            })}
-                                        </div>
-                                    </div>
-                                )}
-                            </div>
-                        )}
+    result.push({
+      day: currentDay,
+      time: timeCell,
+      name: nameCell
+    });
+  }
+  return result;
+}
 
-                        {activeTab === 'hoc' && (
-                            <div className="space-y-4 animate-fade-in">
-                                <div className="bg-white/70 backdrop-blur-md p-6 rounded-[2rem] border border-white shadow-sm">
-                                    <h2 className="text-xl font-black text-slate-800 mb-4 whimsical-font italic">HOC Review</h2>
-                                    <div className="flex gap-2 mb-2 overflow-x-auto no-scrollbar">
-                                        {[1, 2, 3, 4].map(num => (
-                                            <button key={num} onClick={() => setHocSession(num.toString())} className={`flex-1 min-w-[60px] py-2 rounded-xl text-[10px] font-black border transition-all ${hocSession === num.toString() ? 'bg-indigo-600 border-indigo-600 text-white shadow-md' : 'bg-slate-50 border-slate-100 text-slate-400'}`}>S{num}</button>
-                                        ))}
-                                    </div>
-                                </div>
+function formatMassageCell(value, tz, isTime) {
+  if (value === '' || value === null || value === undefined) return '';
+  if (Object.prototype.toString.call(value) === '[object Date]') {
+    return Utilities.formatDate(value, tz, isTime ? 'h:mm a' : 'EEEE, MMM d');
+  }
+  return String(value).trim();
+}
 
-                                <div className="space-y-3">
-                                    {activeHocAbsences.map((a, i) => {
-                                        // Retrieve note safely handling multiple possible casing keys
-                                        const currentNote = hocNotes[a.id] !== undefined ? hocNotes[a.id] : (a.note || a.Note || a.Notes || a.notes || "");
-                                        
-                                        return (
-                                            <div key={a.id || i} className="bg-white/80 backdrop-blur-sm p-4 rounded-3xl shadow-sm border border-slate-100">
-                                                <div className="flex justify-between items-start mb-3">
-                                                    <div>
-                                                        <div className="font-bold text-slate-800">{a.studentName}</div>
-                                                        <div className="text-[9px] text-slate-400 font-bold uppercase mt-1">{a.cabin} • {a.activity}</div>
-                                                    </div>
-                                                    <div className="text-right">
-                                                        <div className={`text-[9px] font-black px-2 py-1 rounded-lg uppercase ${a.status.includes('Excused') ? 'bg-amber-50 text-amber-600' : 'bg-rose-50 text-rose-600'}`}>{a.status}</div>
-                                                        <div className="text-[8px] text-slate-400 mt-1 uppercase">Rep: {a.reportedBy}</div>
-                                                    </div>
-                                                </div>
-                                                
-                                                {/* Added Note Input Field */}
-                                                <div className="mb-3">
-                                                    <input 
-                                                        type="text" 
-                                                        placeholder="Add a note... (e.g. 'At nurse's station')" 
-                                                        value={currentNote}
-                                                        onChange={e => handleNoteChange(a.id, e.target.value)}
-                                                        className="w-full text-xs font-medium p-2.5 bg-slate-50 border border-slate-100 rounded-xl outline-none focus:border-indigo-300 text-slate-600 placeholder-slate-400 transition-colors"
-                                                    />
-                                                </div>
+function getAttendanceStudents() {
+  const sheet = SS.getSheetByName("App Attendance Students");
+  const data = sheet.getDataRange().getValues();
+  return data.slice(1).map(row => ({
+    displayName: row[0],
+    S1: row[1],
+    S2: row[3],
+    S3: row[5],
+    S4: row[7]
+  }));
+}
 
-                                                <div className="grid grid-cols-2 gap-2">
-                                                    {hocSyncingId === a.id ? (
-                                                        <div className="col-span-2 py-2.5 rounded-xl text-[10px] font-black uppercase text-center bg-slate-50 text-slate-400 animate-pulse">Syncing...</div>
-                                                    ) : (
-                                                        <>
-                                                            <button onClick={() => handleHocUpdate(a.studentName, a, 'Absent - Excused', currentNote)} className={`py-2.5 rounded-xl text-[10px] font-black uppercase border transition-all ${a.status === 'Absent - Excused' ? 'bg-amber-500 border-amber-500 text-white' : 'bg-slate-50 border-slate-100 text-amber-600 hover:bg-amber-50'}`}>Excused</button>
-                                                            <button onClick={() => handleHocUpdate(a.studentName, a, 'Resolved', currentNote)} className={`py-2.5 rounded-xl text-[10px] font-black uppercase border transition-all ${a.status === 'Resolved' ? 'bg-indigo-600 border-indigo-600 text-white' : 'border-slate-100 bg-slate-50 text-indigo-600 hover:bg-indigo-50'}`}>Resolved</button>
-                                                        </>
-                                                    )}
-                                                </div>
-                                            </div>
-                                        );
-                                    })}
-                                    {activeHocAbsences.length === 0 && (
-                                        <p className="text-center py-8 text-slate-400 text-xs font-bold italic">No active absences for Session {hocSession} today</p>
-                                    )}
-                                </div>
+/**
+ * Applies a batch of attendance updates inside a script lock, so two staff
+ * submitting concurrently (or a double-tap from a no-cors call with no
+ * feedback) can't create duplicate rows. Reads the sheet only after the
+ * lock is acquired, and batches writes with setValues instead of one
+ * setValue call per cell.
+ */
+function bulkReportAbsences(updates, reportedByEmail) {
+  const lock = LockService.getScriptLock();
+  const gotLock = lock.tryLock(10000);
+  if (!gotLock) {
+    return { success: false, error: "System busy, please try again in a moment." };
+  }
 
-                                {/* Recent Reports block logic */}
-                                <div className="mt-8">
-                                    <h3 className="text-sm font-black text-slate-800 uppercase tracking-widest mb-4 px-2">Recent Absence Reports</h3>
-                                    <div className="space-y-3">
-                                        {recentReportsList.length > 0 ? recentReportsList.map((a, i) => (
-                                            <div key={i} className="flex justify-between items-center p-3 bg-white/70 backdrop-blur-sm rounded-2xl text-xs border border-white shadow-sm">
-                                                <div>
-                                                    <span className="font-bold text-slate-800">{a.studentName}</span>
-                                                    <p className="text-[9px] text-slate-400 font-bold mt-1">Session {a.session} • {a.activity}</p>
-                                                    {/* Display the note in Recent Reports if it exists */}
-                                                    {(a.note || a.Note || a.notes || a.Notes) && <p className="text-[9px] text-slate-500 italic mt-1 bg-slate-50 px-2 py-1 rounded inline-block">{(a.note || a.Note || a.notes || a.Notes)}</p>}
-                                                </div>
-                                                <div className="text-[9px] font-black text-rose-500 bg-rose-50 px-2 py-1 rounded-lg uppercase whitespace-nowrap">{a.status}</div>
-                                            </div>
-                                        )) : (
-                                            <p className="text-center py-8 text-slate-400 text-xs font-bold italic">No recent absence reports</p>
-                                        )}
-                                    </div>
-                                </div>
-                            </div>
-                        )}
+  try {
+    const sheet = SS.getSheetByName("App Attendance Absences");
+    const data = sheet.getDataRange().getValues();
+    const timestamp = new Date();
+    const todayStr = Utilities.formatDate(timestamp, Session.getScriptTimeZone(), "yyyy-MM-dd");
+    const rowsToAppend = [];
 
-                        {activeTab === 'schedule' && (
-                            <div className="space-y-4 animate-fade-in">
-                                <div className="bg-white/70 backdrop-blur-md p-6 rounded-[2rem] border border-white shadow-sm overflow-hidden">
-                                    <h2 className="text-xl font-black text-slate-800 mb-4 whimsical-font italic">Daily Master</h2>
-                                    <div className="overflow-x-auto">
-                                        <table className="w-full text-left min-w-[400px]">
-                                            <thead>
-                                                <tr className="border-b border-slate-200">
-                                                    <th className="p-3 text-[10px] font-black text-slate-400 uppercase tracking-widest">Time</th>
-                                                    <th className="p-3 text-[10px] font-black text-slate-400 uppercase tracking-widest">Activity</th>
-                                                    <th className="p-3 text-[10px] font-black text-slate-400 uppercase tracking-widest">Location</th>
-                                                </tr>
-                                            </thead>
-                                            <tbody>
-                                                {schedule.map((row, i) => (
-                                                    <tr key={i} className="border-b border-slate-50 hover:bg-slate-50/50">
-                                                        <td className="p-3 text-xs font-bold text-indigo-600">{row['Time:']}</td>
-                                                        <td className="p-3 text-xs font-bold text-slate-700">{row['Activity:']}</td>
-                                                        <td className="p-3 text-xs text-slate-500 italic">{row['Location:']}</td>
-                                                    </tr>
-                                                ))}
-                                            </tbody>
-                                        </table>
-                                    </div>
-                                </div>
-                            </div>
-                        )}
+    updates.forEach(upd => {
+      const status = validateStatus(upd.status);
+      if (!status) return; // silently skip anything not on the allowlist
 
-                        {activeTab === 'massage' && (
-                            <div className="space-y-4 animate-fade-in">
-                                <div className="bg-white/70 backdrop-blur-md p-6 rounded-[2rem] border border-white shadow-sm">
-                                    <h2 className="text-xl font-black text-slate-800 mb-1 whimsical-font italic">Massage Appointments</h2>
-                                    <p className="text-xs text-slate-400 font-medium">On-site massage therapist schedule for the week.</p>
-                                </div>
+      const studentName = sanitizeCell(String(upd.studentName || ''));
+      const cabin = sanitizeCell(String(upd.cabin || ''));
+      const activity = sanitizeCell(String(upd.activity || ''));
+      const session = String(upd.session || '');
+      const studentId = sanitizeCell(String(upd.studentId || '000'));
 
-                                {groupedMassage.length > 0 ? groupedMassage.map((group, gi) => (
-                                    <div key={gi} className="bg-white/70 backdrop-blur-md rounded-[2rem] border border-white shadow-sm overflow-hidden">
-                                        <div className="px-6 py-3 bg-slate-900/90 text-white">
-                                            <h3 className="text-xs font-black uppercase tracking-widest">{group.day}</h3>
-                                        </div>
-                                        <div className="divide-y divide-slate-100">
-                                            {group.entries.map((entry, ei) => (
-                                                <div key={ei} className="flex items-center justify-between px-6 py-3">
-                                                    <span className="text-sm font-bold text-slate-800">{entry.name || 'Open slot'}</span>
-                                                    <span className="text-[10px] font-black text-indigo-600 uppercase tracking-widest">{entry.time}</span>
-                                                </div>
-                                            ))}
-                                        </div>
-                                    </div>
-                                )) : (
-                                    <p className="text-center py-8 text-slate-400 text-xs font-bold italic">No massage appointments scheduled</p>
-                                )}
-                            </div>
-                        )}
-                    </main>
-                    <div className="fixed bottom-0 left-0 w-full p-4 bg-gradient-to-t from-slate-50 to-transparent pointer-events-none"></div>
-                    <div className="fixed bottom-4 right-4 z-50 pointer-events-auto">
-                        <button onClick={logout} className="bg-white/80 backdrop-blur-md p-3 rounded-full shadow-lg border border-slate-200 text-rose-500 hover:bg-rose-50 transition-colors">
-                            <Icon name="log-out" size={18} />
-                        </button>
-                    </div>
-                </div>
-            );
+      let rowIndex = -1;
+      for (let i = 1; i < data.length; i++) {
+        const rowDateStr = Utilities.formatDate(new Date(data[i][7]), Session.getScriptTimeZone(), "yyyy-MM-dd");
+        if (data[i][2] === studentName &&
+            String(data[i][4]) === session &&
+            data[i][5] === activity &&
+            rowDateStr === todayStr) {
+          rowIndex = i + 1;
+          break;
         }
+      }
 
-        const root = ReactDOM.createRoot(document.getElementById('root'));
-        root.render(<App />);
-    </script>
-</body>
-</html>
+      if (rowIndex > -1) {
+        sheet.getRange(rowIndex, 7, 1, 3).setValues([[reportedByEmail, timestamp, status]]);
+      } else {
+        const id = Utilities.getUuid();
+        rowsToAppend.push([id, studentId, studentName, cabin, session, activity, reportedByEmail, timestamp, status, '']);
+      }
+    });
+
+    if (rowsToAppend.length > 0) {
+      const startRow = sheet.getLastRow() + 1;
+      sheet.getRange(startRow, 1, rowsToAppend.length, 10).setValues(rowsToAppend);
+    }
+
+    return { success: true };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function updateAbsenceStatus(id, status, note, updatedByEmail) {
+  const validStatus = validateStatus(status);
+  if (!validStatus) {
+    return { success: false, error: "Invalid status." };
+  }
+
+  const lock = LockService.getScriptLock();
+  const gotLock = lock.tryLock(10000);
+  if (!gotLock) {
+    return { success: false, error: "System busy, please try again in a moment." };
+  }
+
+  try {
+    const sheet = SS.getSheetByName("App Attendance Absences");
+    const data = sheet.getDataRange().getValues();
+    const cleanNote = sanitizeCell(String(note || ''));
+
+    for (let i = 1; i < data.length; i++) {
+      if (String(data[i][0]) === String(id)) {
+        // Columns: 7 timestamp, 9 status, 10 note
+        sheet.getRange(i + 1, 8).setValue(new Date());
+        sheet.getRange(i + 1, 9).setValue(validStatus);
+        sheet.getRange(i + 1, 10).setValue(cleanNote);
+        return { success: true };
+      }
+    }
+    return { success: false, error: "Record not found." };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function getSheetData(name) {
+  const sheet = SS.getSheetByName(name);
+  if (!sheet) return [];
+  const data = sheet.getDataRange().getValues();
+  const headers = data[0];
+  return data.slice(1).map(row => {
+    let obj = {};
+    headers.forEach((h, i) => obj[h] = row[i]);
+    return obj;
+  });
+}
+
+function formatDate(date) {
+  if (!date) return "";
+  try {
+    const d = new Date(date);
+    if (isNaN(d.getTime())) return date;
+    return Utilities.formatDate(d, Session.getScriptTimeZone(), "MMM dd, yyyy");
+  } catch (e) { return date; }
+}
