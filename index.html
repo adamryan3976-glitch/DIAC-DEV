@@ -84,6 +84,9 @@
             const [currentUser, setCurrentUser] = useState('');
             const [authError, setAuthError] = useState('');
             const [isLoggingIn, setIsLoggingIn] = useState(false);
+            const [sessionToken, setSessionToken] = useState('');
+            const [fetchError, setFetchError] = useState('');
+            const [submitError, setSubmitError] = useState('');
 
             const [activeTab, setActiveTab] = useState('students');
             const [searchQuery, setSearchQuery] = useState('');
@@ -112,13 +115,22 @@
             useEffect(() => {
                 const user = localStorage.getItem('diac_user');
                 const hoc = localStorage.getItem('diac_hoc');
-                if (user) {
+                const session = localStorage.getItem('diac_session');
+                if (user && session) {
                     setIsAuthenticated(true);
                     setCurrentUser(user);
                     setIsHoc(hoc === 'true');
-                    fetchData();
+                    setSessionToken(session);
+                    fetchData(session);
                 } else { setLoading(false); }
             }, []);
+
+            const logout = () => {
+                localStorage.removeItem('diac_user');
+                localStorage.removeItem('diac_hoc');
+                localStorage.removeItem('diac_session');
+                window.location.reload();
+            };
 
             // Initialize Google SSO Login Interface
             useEffect(() => {
@@ -152,10 +164,12 @@
                     if (data.success) {
                         localStorage.setItem('diac_user', data.email);
                         localStorage.setItem('diac_hoc', String(data.isHoc));
+                        localStorage.setItem('diac_session', data.session);
                         setIsAuthenticated(true);
                         setCurrentUser(data.email);
                         setIsHoc(data.isHoc);
-                        fetchData();
+                        setSessionToken(data.session);
+                        fetchData(data.session);
                     } else {
                         setAuthError(data.error || "Login Failed");
                     }
@@ -166,17 +180,35 @@
                 }
             };
 
-            const fetchData = async () => {
+            const fetchData = async (tokenOverride) => {
+                const token = tokenOverride || sessionToken;
+                if (!token) return;
                 setRefreshing(true);
+                setFetchError('');
                 try {
                     const endpoints = ['students', 'schedule', 'absences', 'classes', 'attStudents'];
                     const results = await Promise.all(
-                        endpoints.map(ep => fetch(`${SCRIPT_URL}?action=${ep}`).then(r => r.json()).catch(() => null))
+                        endpoints.map(ep =>
+                            fetch(`${SCRIPT_URL}?action=${ep}&session=${encodeURIComponent(token)}`)
+                                .then(r => r.json())
+                                .catch(() => ({ error: 'network' }))
+                        )
                     );
-                    
-                    if (results[0]) setStudents(results[0]);
-                    if (results[1]) setSchedule(results[1]);
-                    if (results[2]) {
+
+                    if (results.some(r => r && typeof r.error === 'string' && r.error.startsWith('Unauthorized'))) {
+                        setFetchError('Your session expired. Please sign in again.');
+                        logout();
+                        return;
+                    }
+
+                    const failed = results.some(r => !r || r.error);
+                    if (failed) {
+                        setFetchError('Could not refresh data — showing the last version loaded. Check your connection and try again.');
+                    }
+
+                    if (results[0] && !results[0].error) setStudents(results[0]);
+                    if (results[1] && !results[1].error) setSchedule(results[1]);
+                    if (results[2] && !results[2].error) {
                         setAbsences(results[2]);
                         const initialLocal = {};
                         const today = new Date().toDateString();
@@ -188,11 +220,15 @@
                         });
                         setLocalAttendance(prev => ({...prev, ...initialLocal}));
                     }
-                    if (results[3]) setClasses(results[3]);
-                    if (results[4]) setAttStudents(results[4]);
-                    
-                    setLastUpdated(new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }));
-                } catch (e) { console.error(e); } 
+                    if (results[3] && !results[3].error) setClasses(results[3]);
+                    if (results[4] && !results[4].error) setAttStudents(results[4]);
+
+                    if (!failed) {
+                        setLastUpdated(new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }));
+                    }
+                } catch (e) {
+                    setFetchError('Could not refresh data — showing the last version loaded. Check your connection and try again.');
+                }
                 finally { setLoading(false); setRefreshing(false); setHocSyncingId(null); }
             };
 
@@ -206,17 +242,38 @@
             };
 
             const handleHocUpdate = async (studentName, currentAbsence, newStatus, noteText) => {
+                setHocSyncingId(currentAbsence.id);
+                setFetchError('');
                 try {
-                    setHocSyncingId(currentAbsence.id);
-                    await fetch(`${SCRIPT_URL}?action=updateAbsence&id=${encodeURIComponent(currentAbsence.id)}&status=${encodeURIComponent(newStatus)}&note=${encodeURIComponent(noteText || '')}`, { mode: 'no-cors' });
+                    const res = await fetch(SCRIPT_URL, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                        body: new URLSearchParams({
+                            action: 'updateAbsence',
+                            session: sessionToken,
+                            id: currentAbsence.id,
+                            status: newStatus,
+                            note: noteText || ''
+                        })
+                    });
+                    const data = await res.json();
+                    if (!data || data.success !== true) {
+                        setFetchError((data && data.error) || 'Could not save that update. Please try again.');
+                        setHocSyncingId(null);
+                        return;
+                    }
                     const key = `${studentName}-${currentAbsence.session}-${currentAbsence.activity}`;
                     setLocalAttendance(prev => ({...prev, [key]: newStatus}));
-                    setTimeout(fetchData, 1000);
-                } catch (e) { setHocSyncingId(null); }
+                    await fetchData();
+                } catch (e) {
+                    setFetchError('Could not save that update — check your connection and try again.');
+                    setHocSyncingId(null);
+                }
             };
 
             const handleSubmitAttendance = async () => {
                 setIsSubmitting(true);
+                setSubmitError('');
                 const updates = [];
                 const today = new Date().toDateString();
                 
@@ -249,14 +306,27 @@
                 });
 
                 try {
-                    await fetch(SCRIPT_URL, {
+                    const res = await fetch(SCRIPT_URL, {
                         method: 'POST',
-                        mode: 'no-cors',
                         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-                        body: new URLSearchParams({ action: 'bulkReport', data: JSON.stringify(updates) })
+                        body: new URLSearchParams({
+                            action: 'bulkReport',
+                            session: sessionToken,
+                            data: JSON.stringify(updates)
+                        })
                     });
-                    setTimeout(fetchData, 1500);
-                } catch (e) { setIsSubmitting(false); }
+                    const data = await res.json();
+                    if (!data || data.success !== true) {
+                        setSubmitError((data && data.error) || 'Could not save attendance. Please try again.');
+                        setIsSubmitting(false);
+                        return;
+                    }
+                    await fetchData();
+                } catch (e) {
+                    setSubmitError('Could not save attendance — check your connection and try again.');
+                } finally {
+                    setIsSubmitting(false);
+                }
             };
 
             const sortedArtists = useMemo(() => {
@@ -412,6 +482,15 @@
                     </header>
 
                     <main className="p-4 max-w-xl mx-auto space-y-4">
+                        {fetchError && (
+                            <div className="bg-rose-50 border border-rose-200 text-rose-600 text-xs font-bold p-3 rounded-2xl flex items-center gap-2 animate-fade-in">
+                                <Icon name="alert-triangle" size={16} />
+                                <span>{fetchError}</span>
+                            </div>
+                        )}
+                        {lastUpdated && !fetchError && (
+                            <div className="text-center text-[9px] font-bold text-slate-400 uppercase tracking-widest">Updated {lastUpdated}</div>
+                        )}
                         <nav className="flex bg-white/70 backdrop-blur-md p-1 rounded-2xl shadow-sm border border-white overflow-x-auto no-scrollbar">
                             {['students', 'attendance', 'hoc', 'schedule'].map(tab => (
                                 (tab !== 'hoc' || isHoc) && 
@@ -474,6 +553,12 @@
                                             <Icon name={isSubmitting ? "loader" : "save"} className={isSubmitting ? "animate-spin" : ""} />
                                             {isSubmitting ? 'SYNCING...' : 'SUBMIT ATTENDANCE'}
                                         </button>
+                                        {submitError && (
+                                            <div className="bg-rose-50 border border-rose-200 text-rose-600 text-xs font-bold p-3 rounded-2xl flex items-center gap-2 animate-fade-in">
+                                                <Icon name="alert-triangle" size={16} />
+                                                <span>{submitError}</span>
+                                            </div>
+                                        )}
 
                                         <div className="space-y-3">
                                             {enrolledInCurrent.map((s, i) => {
@@ -635,7 +720,7 @@
                     </main>
                     <div className="fixed bottom-0 left-0 w-full p-4 bg-gradient-to-t from-slate-50 to-transparent pointer-events-none"></div>
                     <div className="fixed bottom-4 right-4 z-50 pointer-events-auto">
-                        <button onClick={() => { localStorage.removeItem('diac_user'); localStorage.removeItem('diac_hoc'); window.location.reload(); }} className="bg-white/80 backdrop-blur-md p-3 rounded-full shadow-lg border border-slate-200 text-rose-500 hover:bg-rose-50 transition-colors">
+                        <button onClick={logout} className="bg-white/80 backdrop-blur-md p-3 rounded-full shadow-lg border border-slate-200 text-rose-500 hover:bg-rose-50 transition-colors">
                             <Icon name="log-out" size={18} />
                         </button>
                     </div>
